@@ -1,0 +1,104 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+concurrency: release
+
+permissions:
+  contents: write
+
+jobs:
+  release-on-pr:
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+    name: Tag & Release (PR merge)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version bump
+        id: bump
+        env:
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          if echo "$PR_LABELS" | grep -q '"major"'; then
+            echo "bump=major" >> "$GITHUB_OUTPUT"
+          elif echo "$PR_LABELS" | grep -q '"minor"'; then
+            echo "bump=minor" >> "$GITHUB_OUTPUT"
+          else
+            echo "bump=patch" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Get latest tag
+        id: latest
+        run: |
+          TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+          echo "tag=${TAG:-v0.0.0}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute next version
+        id: next
+        env:
+          BUMP: ${{ steps.bump.outputs.bump }}
+          LATEST_TAG: ${{ steps.latest.outputs.tag }}
+        run: |
+          VERSION="${LATEST_TAG#v}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+          echo "version=v${MAJOR}.${MINOR}.${PATCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Create tag
+        env:
+          NEXT_VERSION: ${{ steps.next.outputs.version }}
+        run: |
+          git tag "$NEXT_VERSION"
+          git push origin "$NEXT_VERSION"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-on-tag:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    name: Release (tag push)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

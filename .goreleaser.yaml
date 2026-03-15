@@ -1,0 +1,52 @@
+project_name: claude-status-go
+builds:
+- main: ./main.go
+  binary: claude-status-go
+  goos:
+    - darwin
+    - linux
+  goarch:
+    - amd64
+    - arm64
+  ldflags:
+    - -s -w
+    - -X github.com/xgarcia/claude-status-go/pkg.BuildVersion={{.Version}}
+    - -X github.com/xgarcia/claude-status-go/pkg.BuildCommit={{.ShortCommit}}
+    - -X github.com/xgarcia/claude-status-go/pkg.BuildTime={{.Timestamp}}
+checksum:
+  name_template: 'checksums.txt'
+snapshot:
+  name_template: "{{ .Tag }}-next"
+release:
+  extra_files:
+    - glob: install.sh
+  header: |
+    **claude-status-go** — A fast Go binary for your Claude Code status line.
+
+    **Download:** grab the archive for your platform below, or run:
+    ```
+    gh release download --repo xgarcia/claude-status-go --pattern "install.sh" --output - | bash
+    ```
+  footer: |
+    ---
+    **Full Changelog**: https://github.com/xgarcia/claude-status-go/compare/{{ .PreviousTag }}...{{ .Tag }}
+changelog:
+  sort: asc
+  groups:
+    - title: "New Features"
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: "Bug Fixes"
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: "Refactoring"
+      regexp: '^.*?refac(\(.+\))??!?:.+$'
+      order: 2
+    - title: "Maintenance"
+      order: 999
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^Merge'
