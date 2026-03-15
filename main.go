@@ -205,7 +205,16 @@ type Input struct {
 	Model         ModelInfo     `json:"model"`
 	ContextWindow ContextWindow `json:"context_window"`
 	Session       Session       `json:"session"`
+	Cost          CostInfo      `json:"cost"`
 	Cwd           string        `json:"cwd"`
+}
+
+type CostInfo struct {
+	TotalCostUSD      float64 `json:"total_cost_usd"`
+	TotalDurationMs   int64   `json:"total_duration_ms"`
+	TotalApiDurationMs int64  `json:"total_api_duration_ms"`
+	TotalLinesAdded   int     `json:"total_lines_added"`
+	TotalLinesRemoved int     `json:"total_lines_removed"`
 }
 
 type ModelInfo struct {
@@ -214,6 +223,7 @@ type ModelInfo struct {
 
 type ContextWindow struct {
 	ContextWindowSize int          `json:"context_window_size"`
+	TotalOutputTokens int          `json:"total_output_tokens"`
 	CurrentUsage      CurrentUsage `json:"current_usage"`
 }
 
@@ -564,9 +574,16 @@ func main() {
 		data = Input{
 			Model:   ModelInfo{DisplayName: "Claude Opus 4.6"},
 			Session: Session{StartTime: time.Now().Add(-42 * time.Minute).UTC().Format(time.RFC3339)},
+			Cost: CostInfo{
+				TotalCostUSD:       3.45,
+				TotalLinesAdded:    482,
+				TotalLinesRemoved:  37,
+				TotalApiDurationMs: 198000,
+			},
 			Cwd:     cwd,
 			ContextWindow: ContextWindow{
 				ContextWindowSize: 200000,
+				TotalOutputTokens: 24500,
 				CurrentUsage: CurrentUsage{
 					InputTokens:              65000,
 					CacheCreationInputTokens: 8000,
@@ -579,6 +596,13 @@ func main() {
 		if len(strings.TrimSpace(string(input))) == 0 {
 			fmt.Print("Claude")
 			return
+		}
+		// Dump raw JSON for debugging
+		for _, arg := range os.Args[1:] {
+			if arg == "--dump" {
+				_ = os.WriteFile("/tmp/claude/statusline-stdin-dump.json", input, 0644)
+				break
+			}
 		}
 		if err := json.Unmarshal(input, &data); err != nil {
 			fmt.Print("Claude")
@@ -671,6 +695,19 @@ func main() {
 		line1 += dim + "⏱ " + reset + white + sessionDuration + reset
 	}
 
+	if data.Cost.TotalCostUSD > 0 {
+		line1 += sep
+		costColor := green
+		if data.Cost.TotalCostUSD >= 10 {
+			costColor = red
+		} else if data.Cost.TotalCostUSD >= 5 {
+			costColor = yellow
+		} else if data.Cost.TotalCostUSD >= 2 {
+			costColor = orange
+		}
+		line1 += costColor + fmt.Sprintf("💰 $%.2f", data.Cost.TotalCostUSD) + reset
+	}
+
 	line1 += sep
 	switch effort {
 	case "high":
@@ -699,6 +736,39 @@ func main() {
 			statsStr += " " + yellow + fmt.Sprintf("~%d", gStats.Modified) + reset
 		}
 		line2 += " " + green + "(" + branch + dirtyStr + green + statsStr + green + ")" + reset
+	}
+
+	// ── LINE 3: Session stats ──────────────────────────
+	line3 := ""
+	hasStats := data.Cost.TotalLinesAdded > 0 || data.Cost.TotalLinesRemoved > 0 ||
+		data.ContextWindow.TotalOutputTokens > 0 || data.Cost.TotalApiDurationMs > 0
+
+	if hasStats {
+		parts := []string{}
+
+		if data.Cost.TotalLinesAdded > 0 || data.Cost.TotalLinesRemoved > 0 {
+			parts = append(parts, green+fmt.Sprintf("+%d", data.Cost.TotalLinesAdded)+reset+
+				" "+red+fmt.Sprintf("-%d", data.Cost.TotalLinesRemoved)+reset+dim+" lines"+reset)
+		}
+
+		if data.ContextWindow.TotalOutputTokens > 0 {
+			parts = append(parts, white+formatTokens(data.ContextWindow.TotalOutputTokens)+reset+dim+" tokens out"+reset)
+		}
+
+		if data.Cost.TotalApiDurationMs > 0 {
+			apiSecs := int(data.Cost.TotalApiDurationMs / 1000)
+			apiTime := ""
+			if apiSecs >= 3600 {
+				apiTime = fmt.Sprintf("%dh%dm", apiSecs/3600, (apiSecs%3600)/60)
+			} else if apiSecs >= 60 {
+				apiTime = fmt.Sprintf("%dm%ds", apiSecs/60, apiSecs%60)
+			} else {
+				apiTime = fmt.Sprintf("%ds", apiSecs)
+			}
+			parts = append(parts, white+apiTime+reset+dim+" api"+reset)
+		}
+
+		line3 = "📊 " + strings.Join(parts, sep)
 	}
 
 	// ── Rate limit lines ────────────────────────────────
@@ -761,8 +831,14 @@ func main() {
 	fmt.Print(line1)
 	if standalone {
 		fmt.Print("\n\n  " + line2)
+		if line3 != "" {
+			fmt.Print("\n  " + line3)
+		}
 	} else {
 		fmt.Print("\n\n" + line2)
+		if line3 != "" {
+			fmt.Print("\n" + line3)
+		}
 	}
 	if rateLines != "" {
 		if standalone {
