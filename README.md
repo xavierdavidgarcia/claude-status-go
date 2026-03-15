@@ -1,14 +1,15 @@
 # claude-status-go
 
-A fast, single-binary statusline for [Claude Code](https://claude.ai/code). Displays model info, context usage, cache hit ratio, rate limits, git stats, session duration, and extra usage burn rate — all rendered with ANSI colors.
+A fast, single-binary statusline for [Claude Code](https://claude.ai/code). Displays hostname, model info, context usage, cache hit ratio, rate limits, git stats, session duration, and extra usage burn rate — all rendered with ANSI colors.
 
 ```
-Claude Opus 4.6 │ 🪟 76.5k/200k (38%) 💾 82% cache │ ⏱ 42m │ ● high
+💻 Newton │ Claude Opus 4.6 │ 🪟 76.5k/200k (38%) 💾 82% cache │ ⏱ 42m │ ● high
+
 📂 ~/project (main* +3 ~2)
 
-current  ●●●●○○○○○○  30% ⟳ 2:30pm
-weekly   ●●○○○○○○○○  20% ⟳ mar 18, 9:00am
-extra    ●○○○○○○○○○  $4.50/$20.00 ⟳ apr 1  📈 $0.64/day → $19.84 proj
+current  ━━━───────  30%  ⟳  2:30pm
+weekly   ━━────────  20%  ⟳  mar 18, 9:00am
+extra    ━─────────  $4.50/$20.00  ⟳  apr 1  📈 $0.64/day → $19.84 proj
 ```
 
 ## Install
@@ -24,10 +25,54 @@ gh release download --repo xgarcia/claude-status-go --pattern "install.sh" --out
 ```bash
 git clone https://github.com/xgarcia/claude-status-go.git
 cd claude-status-go
-make all
+make install
 ```
 
-`make all` builds the binary and installs it to `~/.claude/claude-status-go`, then updates `~/.claude/settings.json` with the statusLine config. Restart Claude Code to activate.
+### Custom install with theme and bar style
+
+```bash
+make install THEME=dracula BAR=block
+```
+
+This bakes the flags into `~/.claude/settings.json` so they apply automatically.
+
+`make install` builds the binary and installs it to `~/.claude/claude-status-go`, then updates `~/.claude/settings.json` with the statusLine config. Restart Claude Code to activate.
+
+## Themes
+
+Set via `--theme <name>` flag, `CLAUDE_STATUSLINE_THEME` env var, or `make install THEME=<name>`.
+
+| Theme | Description |
+|-------|-------------|
+| `default` | Vibrant colors — blue, green, orange |
+| `dracula` | Purple-tinted dark theme |
+| `catppuccin` | Soft pastel palette |
+| `solarized` | Ethan Schoonover's classic palette |
+| `mono` | Grayscale, no color distractions |
+
+List all themes:
+
+```bash
+./claude-status-go --themes
+```
+
+## Bar Styles
+
+Set via `--bar <name>` flag, `CLAUDE_STATUSLINE_BAR` env var, or `make install BAR=<name>`.
+
+| Name | Filled | Empty | Example |
+|------|--------|-------|---------|
+| `line` (default) | `━` | `─` | `━━━───────` |
+| `classic` | `●` | `○` | `●●●○○○○○○○` |
+| `block` | `█` | `░` | `███░░░░░░░` |
+| `braille` | `⣿` | `⠀` | `⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀` |
+| `geometric` | `▰` | `▱` | `▰▰▰▱▱▱▱▱▱▱` |
+
+List all styles:
+
+```bash
+./claude-status-go --bars
+```
 
 ## Usage
 
@@ -39,16 +84,20 @@ Run without a pipe to see a standalone demo with sample data:
 ./claude-status-go
 ```
 
-### Flags
+## Flags
 
 | Flag | Description |
 |------|-------------|
 | `--version`, `-v` | Print version info |
 | `--update` | Self-update to the latest release |
+| `--theme <name>` | Set color theme |
+| `--themes` | List available themes |
+| `--bar <name>` | Set bar style |
+| `--bars` | List available bar styles |
 
 ## What it shows
 
-**Line 1** — Model name, token usage with context percentage, cache hit ratio, session duration, effort level
+**Line 1** — Hostname, model name, token usage with context percentage, cache hit ratio, session duration, effort level
 
 **Line 2** — Working directory with git branch, dirty indicator, and file counts (added/modified)
 
@@ -90,9 +139,9 @@ Rate limit data is fetched from the Anthropic usage API and cached to `/tmp/clau
 
 | Target | Description |
 |--------|-------------|
-| `make all` | Build and install (default) |
-| `make build` | Build the binary |
 | `make install` | Build, copy to `~/.claude/`, update settings |
+| `make install THEME=dracula BAR=block` | Install with custom theme and bar style |
+| `make build` | Build the binary only |
 | `make uninstall` | Remove binary, restore backups, clean settings |
 | `make test` | Run tests |
 | `make clean` | Remove local binary |
