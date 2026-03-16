@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-REPO="xgarcia/claude-status-go"
+REPO="xavierdavidgarcia/claude-status-go"
 BINARY="claude-status-go"
 INSTALL_DIR="${HOME}/.claude"
 SETTINGS="${INSTALL_DIR}/settings.json"
