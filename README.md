@@ -17,13 +17,13 @@ extra    ━─────────  $4.50/$20.00  ⟳  apr 1  📈 $0.64/da
 ### One-liner (requires `gh`)
 
 ```bash
-gh release download --repo xgarcia/claude-status-go --pattern "install.sh" --output - | bash
+gh release download --repo xavierdavidgarcia/claude-status-go --pattern "install.sh" --output - | bash
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/xgarcia/claude-status-go.git
+git clone https://github.com/xavierdavidgarcia/claude-status-go.git
 cd claude-status-go
 make install
 ```

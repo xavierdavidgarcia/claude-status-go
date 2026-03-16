@@ -25,11 +25,11 @@ release:
 
     **Download:** grab the archive for your platform below, or run:
     ```
-    gh release download --repo xgarcia/claude-status-go --pattern "install.sh" --output - | bash
+    gh release download --repo xavierdavidgarcia/claude-status-go --pattern "install.sh" --output - | bash
     ```
   footer: |
     ---
-    **Full Changelog**: https://github.com/xgarcia/claude-status-go/compare/{{ .PreviousTag }}...{{ .Tag }}
+    **Full Changelog**: https://github.com/xavierdavidgarcia/claude-status-go/compare/{{ .PreviousTag }}...{{ .Tag }}
 changelog:
   sort: asc
   groups:
