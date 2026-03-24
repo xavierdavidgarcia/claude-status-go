@@ -5,6 +5,14 @@ REPO="xavierdavidgarcia/claude-status-go"
 BINARY="claude-status-go"
 INSTALL_DIR="${HOME}/.claude"
 SETTINGS="${INSTALL_DIR}/settings.json"
+ENABLE_AGENTS=false
+
+# Parse flags
+for arg in "$@"; do
+    case "$arg" in
+        --agents) ENABLE_AGENTS=true ;;
+    esac
+done
 
 blue='\033[38;2;0;153;255m'
 green='\033[38;2;0;175;80m'
@@ -93,7 +101,43 @@ else
     echo -e "    ${dim}{\"statusLine\":{\"type\":\"command\",\"command\":\"${STATUS_CMD}\"}}${reset}"
 fi
 
+# ── Install agent tracking hook ─────────────────────
+if [ "$ENABLE_AGENTS" = true ]; then
+    HOOK_SCRIPT="${INSTALL_DIR}/${BINARY}-agent-tracker.sh"
+
+    # Download or copy hook script
+    if [ -f "$TMPDIR/hooks/agent-tracker.sh" ]; then
+        cp "$TMPDIR/hooks/agent-tracker.sh" "$HOOK_SCRIPT"
+    else
+        # Fetch from release assets
+        if command -v gh >/dev/null 2>&1; then
+            gh release download --repo "$REPO" --pattern "agent-tracker.sh" --output "$HOOK_SCRIPT" --clobber 2>/dev/null || true
+        fi
+    fi
+
+    # If we have the script, install the hooks
+    if [ -f "$HOOK_SCRIPT" ]; then
+        chmod 755 "$HOOK_SCRIPT"
+        if command -v jq >/dev/null 2>&1; then
+            tmp=$(mktemp)
+            HOOK_CMD="$HOOK_SCRIPT"
+            jq --arg cmd "$HOOK_CMD" '
+                .hooks.PreToolUse = ((.hooks.PreToolUse // []) + [{"matcher": "Agent|Task", "hooks": [{"type": "command", "command": $cmd}]}] | unique_by(.matcher))
+                | .hooks.PostToolUse = ((.hooks.PostToolUse // []) + [{"matcher": "Agent|Task", "hooks": [{"type": "command", "command": $cmd}]}] | unique_by(.matcher))
+            ' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
+            success "Installed agent tracking hooks into ${dim}settings.json${reset}"
+        else
+            warn "jq not found — add agent hooks to ${dim}${SETTINGS}${reset} manually"
+        fi
+    else
+        warn "Could not find agent-tracker.sh — skipping hook install"
+    fi
+fi
+
 echo ""
 echo -e "  ${green}Done!${reset} Restart Claude Code to see your new status line."
+if [ "$ENABLE_AGENTS" = true ]; then
+    echo -e "  ${dim}Agent tracking enabled — spawn agents to see them in the status line.${reset}"
+fi
 echo -e "  ${dim}Run '${INSTALL_DIR}/${BINARY} --version' to verify.${reset}"
 echo ""

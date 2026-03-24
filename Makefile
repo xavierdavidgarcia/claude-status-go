@@ -2,9 +2,10 @@ BINARY      := claude-status-go
 INSTALL_DIR := $(HOME)/.claude
 SETTINGS    := $(INSTALL_DIR)/settings.json
 
-# Customization (optional): make install THEME=dracula BAR=block
+# Customization (optional): make install THEME=dracula BAR=block AGENTS=1
 THEME       ?=
 BAR         ?=
+AGENTS      ?=
 
 VERSION     := $(shell git describe --tags --always 2>/dev/null || echo "dev")
 COMMIT      := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -50,6 +51,17 @@ install: build
 	@echo "✓ Updated settings.json with statusLine config"
 	@if [ -n "$(THEME)" ]; then echo "  Theme: $(THEME)"; fi
 	@if [ -n "$(BAR)" ]; then echo "  Bar:   $(BAR)"; fi
+	@if [ -n "$(AGENTS)" ]; then \
+		cp hooks/agent-tracker.sh "$(INSTALL_DIR)/$(BINARY)-agent-tracker.sh"; \
+		chmod 755 "$(INSTALL_DIR)/$(BINARY)-agent-tracker.sh"; \
+		HOOK_CMD="$(INSTALL_DIR)/$(BINARY)-agent-tracker.sh"; \
+		tmp=$$(mktemp); \
+		jq --arg cmd "$$HOOK_CMD" ' \
+			.hooks.PreToolUse = ((.hooks.PreToolUse // []) + [{"matcher": "Agent|Task", "hooks": [{"type": "command", "command": $$cmd}]}] | unique_by(.matcher)) \
+			| .hooks.PostToolUse = ((.hooks.PostToolUse // []) + [{"matcher": "Agent|Task", "hooks": [{"type": "command", "command": $$cmd}]}] | unique_by(.matcher)) \
+		' "$(SETTINGS)" > "$$tmp" && mv "$$tmp" "$(SETTINGS)"; \
+		echo "✓ Installed agent tracking hooks"; \
+	fi
 	@echo ""
 	@echo "Done! Restart Claude Code to see your new status line."
 

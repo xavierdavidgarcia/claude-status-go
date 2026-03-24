@@ -393,13 +393,8 @@ func getOAuthToken() string {
 	// 2. macOS Keychain
 	if runtime.GOOS == "darwin" {
 		if blob, err := exec.Command("security", "find-generic-password", "-s", "Claude Code-credentials", "-w").Output(); err == nil {
-			var creds map[string]map[string]string
-			if json.Unmarshal(blob, &creds) == nil {
-				if oauth, ok := creds["claudeAiOauth"]; ok {
-					if token, ok := oauth["accessToken"]; ok && token != "" {
-						return token
-					}
-				}
+			if token := extractAccessToken(blob); token != "" {
+				return token
 			}
 		}
 	}
@@ -408,30 +403,32 @@ func getOAuthToken() string {
 	home, _ := os.UserHomeDir()
 	credsFile := filepath.Join(home, ".claude", ".credentials.json")
 	if data, err := os.ReadFile(credsFile); err == nil {
-		var creds map[string]map[string]string
-		if json.Unmarshal(data, &creds) == nil {
-			if oauth, ok := creds["claudeAiOauth"]; ok {
-				if token, ok := oauth["accessToken"]; ok && token != "" {
-					return token
-				}
-			}
+		if token := extractAccessToken(data); token != "" {
+			return token
 		}
 	}
 
 	// 4. Linux secret-tool
 	if runtime.GOOS == "linux" {
 		if blob, err := exec.Command("secret-tool", "lookup", "service", "Claude Code-credentials").Output(); err == nil {
-			var creds map[string]map[string]string
-			if json.Unmarshal(blob, &creds) == nil {
-				if oauth, ok := creds["claudeAiOauth"]; ok {
-					if token, ok := oauth["accessToken"]; ok && token != "" {
-						return token
-					}
-				}
+			if token := extractAccessToken(blob); token != "" {
+				return token
 			}
 		}
 	}
 
+	return ""
+}
+
+func extractAccessToken(data []byte) string {
+	var creds map[string]map[string]interface{}
+	if json.Unmarshal(data, &creds) == nil {
+		if oauth, ok := creds["claudeAiOauth"]; ok {
+			if token, ok := oauth["accessToken"].(string); ok && token != "" {
+				return token
+			}
+		}
+	}
 	return ""
 }
 
@@ -508,6 +505,25 @@ func getEffortLevel() string {
 		return effort
 	}
 	return "default"
+}
+
+// ── Agent status tracking ───────────────────────────────
+type AgentStatus struct {
+	Active    int `json:"active"`
+	Completed int `json:"completed"`
+}
+
+func getAgentStatus(pid int) AgentStatus {
+	trackFile := fmt.Sprintf("/tmp/claude/agents-%d.json", pid)
+	data, err := os.ReadFile(trackFile)
+	if err != nil {
+		return AgentStatus{}
+	}
+	var status AgentStatus
+	if json.Unmarshal(data, &status) != nil {
+		return AgentStatus{}
+	}
+	return status
 }
 
 // ── Burn rate calculation ───────────────────────────────
@@ -608,6 +624,15 @@ func main() {
 			fmt.Print("Claude")
 			return
 		}
+	}
+
+	// ── Agent status ───────────────────────────────────
+	var agentStatus AgentStatus
+	if standalone {
+		// Demo data: show sample agent activity
+		agentStatus = AgentStatus{Active: 2, Completed: 5}
+	} else {
+		agentStatus = getAgentStatus(os.Getppid())
 	}
 
 	// ── Parse input fields ──────────────────────────────
@@ -771,6 +796,19 @@ func main() {
 		line3 = "📊 " + strings.Join(parts, sep)
 	}
 
+	// ── LINE 4: Agent status ───────────────────────────
+	agentLine := ""
+	if agentStatus.Active > 0 || agentStatus.Completed > 0 {
+		parts := []string{}
+		if agentStatus.Active > 0 {
+			parts = append(parts, orange+fmt.Sprintf("%d running", agentStatus.Active)+reset)
+		}
+		if agentStatus.Completed > 0 {
+			parts = append(parts, green+fmt.Sprintf("%d done", agentStatus.Completed)+reset)
+		}
+		agentLine = "🤖 " + strings.Join(parts, sep)
+	}
+
 	// ── Rate limit lines ────────────────────────────────
 	usageData := fetchUsageData()
 	rateLines := ""
@@ -834,10 +872,16 @@ func main() {
 		if line3 != "" {
 			fmt.Print("\n  " + line3)
 		}
+		if agentLine != "" {
+			fmt.Print("\n  " + agentLine)
+		}
 	} else {
 		fmt.Print("\n\n" + line2)
 		if line3 != "" {
 			fmt.Print("\n" + line3)
+		}
+		if agentLine != "" {
+			fmt.Print("\n" + agentLine)
 		}
 	}
 	if rateLines != "" {

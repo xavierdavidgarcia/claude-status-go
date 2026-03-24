@@ -6,6 +6,8 @@ A fast, single-binary statusline for [Claude Code](https://claude.ai/code). Disp
 💻 Newton │ Claude Opus 4.6 │ 🪟 76.5k/200k (38%) 💾 82% cache │ ⏱ 42m │ ● high
 
 📂 ~/project (main* +3 ~2)
+📊 +482 -37 lines │ 24.5k tokens out │ 3m18s api
+🤖 2 running │ 5 done
 
 current  ━━━───────  30%  ⟳  2:30pm
 weekly   ━━────────  20%  ⟳  mar 18, 9:00am
@@ -35,6 +37,20 @@ make install THEME=dracula BAR=block
 ```
 
 This bakes the flags into `~/.claude/settings.json` so they apply automatically.
+
+### Enable agent tracking
+
+```bash
+make install AGENTS=1
+```
+
+Or with the install script:
+
+```bash
+gh release download --repo xavierdavidgarcia/claude-status-go --pattern "install.sh" --output - | bash -s -- --agents
+```
+
+This installs a Claude Code hook that tracks Agent/Task tool invocations via `PreToolUse`/`PostToolUse` hooks in `~/.claude/settings.json`. The status line then shows how many agents are running and how many have completed. Without `--agents`, no hook is installed and no agent line is shown.
 
 `make install` builds the binary and installs it to `~/.claude/claude-status-go`, then updates `~/.claude/settings.json` with the statusLine config. Restart Claude Code to activate.
 
@@ -100,6 +116,10 @@ Run without a pipe to see a standalone demo with sample data:
 **Line 1** — Hostname, model name, token usage with context percentage, cache hit ratio, session duration, effort level
 
 **Line 2** — Working directory with git branch, dirty indicator, and file counts (added/modified)
+
+**Line 3** — Session stats: lines changed, tokens output, API time
+
+**Line 4** — Agent status: running and completed counts (only shown when agent tracking is enabled via `--agents`)
 
 **Rate limits** — 5-hour and 7-day usage bars with reset times, plus extra usage credits with daily burn rate and projected monthly spend
 
