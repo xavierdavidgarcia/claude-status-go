@@ -15,7 +15,7 @@ fi
 
 mkdir -p "$TRACK_DIR"
 
-# Use PPID (Claude Code process) as the tracking key
+# PPID is the Claude Code process that spawned this hook
 TRACK_FILE="${TRACK_DIR}/agents-${PPID}.json"
 
 # Initialize if missing
@@ -29,11 +29,8 @@ COMPLETED=$(grep -o '"completed":[0-9]*' "$TRACK_FILE" | cut -d: -f2 || echo "0"
 ACTIVE=${ACTIVE:-0}
 COMPLETED=${COMPLETED:-0}
 
-# Determine hook type from env or input
-HOOK_TYPE="${CLAUDE_HOOK_EVENT:-}"
-if [ -z "$HOOK_TYPE" ]; then
-    HOOK_TYPE=$(echo "$INPUT" | grep -o '"hook_type":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-fi
+# Detect hook type via hook_event_name field (set by Claude Code)
+HOOK_TYPE=$(echo "$INPUT" | grep -o '"hook_event_name":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
 
 case "$HOOK_TYPE" in
     PreToolUse)
