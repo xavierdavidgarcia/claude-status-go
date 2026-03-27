@@ -515,29 +515,22 @@ type AgentStatus struct {
 	DoneNames    []string `json:"done_names"`
 }
 
-func getAgentStatus() AgentStatus {
-	entries, err := os.ReadDir(cacheDir)
+func getAgentStatus(pid int) AgentStatus {
+	// The hook writes a .link file mapping PPID → session tracking file
+	linkFile := fmt.Sprintf("%s/agents-pid-%d.link", cacheDir, pid)
+	trackPath, err := os.ReadFile(linkFile)
 	if err != nil {
 		return AgentStatus{}
 	}
-	var total AgentStatus
-	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), "agents-") || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(cacheDir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var s AgentStatus
-		if json.Unmarshal(data, &s) == nil {
-			total.Active += s.Active
-			total.Completed += s.Completed
-			total.RunningNames = append(total.RunningNames, s.RunningNames...)
-			total.DoneNames = append(total.DoneNames, s.DoneNames...)
-		}
+	data, err := os.ReadFile(strings.TrimSpace(string(trackPath)))
+	if err != nil {
+		return AgentStatus{}
 	}
-	return total
+	var status AgentStatus
+	if json.Unmarshal(data, &status) != nil {
+		return AgentStatus{}
+	}
+	return status
 }
 
 func filterNonEmpty(ss []string) []string {
@@ -660,7 +653,7 @@ func main() {
 			DoneNames:    []string{"linter", "build", "deploy", "docs", "notify"},
 		}
 	} else {
-		agentStatus = getAgentStatus()
+		agentStatus = getAgentStatus(os.Getppid())
 	}
 
 	// ── Parse input fields ──────────────────────────────
