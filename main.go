@@ -383,6 +383,37 @@ func gitStats(cwd string) GitStats {
 	return stats
 }
 
+func gitShortCommit(cwd string) string {
+	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--short", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+type PRInfo struct {
+	Number int
+	URL    string
+}
+
+func gitPRInfo(cwd string) PRInfo {
+	out, err := exec.Command("gh", "pr", "view", "--json", "number,url", "-q", ".number,.url").Output()
+	if err != nil {
+		return PRInfo{}
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) < 2 {
+		return PRInfo{}
+	}
+	num := 0
+	fmt.Sscanf(lines[0], "%d", &num)
+	return PRInfo{Number: num, URL: strings.TrimSpace(lines[1])}
+}
+
+func termLink(text, url string) string {
+	return fmt.Sprintf("\033]8;;%s\033\\%s\033]8;;\033\\", url, text)
+}
+
 // ── OAuth token resolution ──────────────────────────────
 func getOAuthToken() string {
 	// 1. Environment variable
@@ -766,7 +797,7 @@ func main() {
 		line1 += dim + "◑ " + effort + reset
 	}
 
-	// ── LINE 2: Directory (branch) ──────────────────────
+	// ── LINE 2: Directory (branch) commit PR ────────────
 	line2 := "📂 " + cyan + displayCwd + reset
 
 	if branch != "" {
@@ -782,6 +813,24 @@ func main() {
 			statsStr += " " + yellow + fmt.Sprintf("~%d", gStats.Modified) + reset
 		}
 		line2 += " " + green + "(" + branch + dirtyStr + green + statsStr + green + ")" + reset
+	}
+
+	// Short commit SHA
+	shortCommit := gitShortCommit(cwd)
+	if shortCommit != "" {
+		line2 += " " + dim + shortCommit + reset
+	}
+
+	// PR info (clickable link)
+	prInfo := gitPRInfo(cwd)
+	if prInfo.Number > 0 {
+		prText := fmt.Sprintf("#%d", prInfo.Number)
+		if prInfo.URL != "" {
+			prText = termLink(blue+prText+reset, prInfo.URL)
+		} else {
+			prText = blue + prText + reset
+		}
+		line2 += " " + prText
 	}
 
 	// ── LINE 3: Session stats ──────────────────────────

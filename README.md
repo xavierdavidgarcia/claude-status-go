@@ -5,9 +5,9 @@ A fast, single-binary statusline for [Claude Code](https://claude.ai/code). Disp
 ```
 💻 Newton │ Claude Opus 4.6 │ 🪟 76.5k/200k (38%) 💾 82% cache │ ⏱ 42m │ ● high
 
-📂 ~/project (main* +3 ~2)
+📂 ~/project (main* +3 ~2) abc1234 #42
 📊 +482 -37 lines │ 24.5k tokens out │ 3m18s api
-🤖 2 running │ 5 done
+🤖 2 running (code review, test runner) │ 5 done (build, deploy, notify)
 
 current  ━━━───────  30%  ⟳  2:30pm
 weekly   ━━────────  20%  ⟳  mar 18, 9:00am
@@ -115,7 +115,7 @@ Run without a pipe to see a standalone demo with sample data:
 
 **Line 1** — Hostname, model name, token usage with context percentage, cache hit ratio, session duration, effort level
 
-**Line 2** — Working directory with git branch, dirty indicator, and file counts (added/modified)
+**Line 2** — Working directory with git branch, dirty indicator, file counts, short commit SHA, and PR number (clickable link if terminal supports OSC 8)
 
 **Line 3** — Session stats: lines changed, tokens output, API time
 
