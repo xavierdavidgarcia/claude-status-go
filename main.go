@@ -509,21 +509,45 @@ func getEffortLevel() string {
 
 // ── Agent status tracking ───────────────────────────────
 type AgentStatus struct {
-	Active    int `json:"active"`
-	Completed int `json:"completed"`
+	Active       int      `json:"active"`
+	Completed    int      `json:"completed"`
+	RunningNames []string `json:"running_names"`
+	DoneNames    []string `json:"done_names"`
 }
 
-func getAgentStatus(pid int) AgentStatus {
-	trackFile := fmt.Sprintf("/tmp/claude/agents-%d.json", pid)
-	data, err := os.ReadFile(trackFile)
+func getAgentStatus() AgentStatus {
+	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
 		return AgentStatus{}
 	}
-	var status AgentStatus
-	if json.Unmarshal(data, &status) != nil {
-		return AgentStatus{}
+	var total AgentStatus
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "agents-") || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(cacheDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var s AgentStatus
+		if json.Unmarshal(data, &s) == nil {
+			total.Active += s.Active
+			total.Completed += s.Completed
+			total.RunningNames = append(total.RunningNames, s.RunningNames...)
+			total.DoneNames = append(total.DoneNames, s.DoneNames...)
+		}
 	}
-	return status
+	return total
+}
+
+func filterNonEmpty(ss []string) []string {
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // ── Burn rate calculation ───────────────────────────────
@@ -630,9 +654,13 @@ func main() {
 	var agentStatus AgentStatus
 	if standalone {
 		// Demo data: show sample agent activity
-		agentStatus = AgentStatus{Active: 2, Completed: 5}
+		agentStatus = AgentStatus{
+			Active: 2, Completed: 5,
+			RunningNames: []string{"code review", "test runner"},
+			DoneNames:    []string{"linter", "build", "deploy", "docs", "notify"},
+		}
 	} else {
-		agentStatus = getAgentStatus(os.Getppid())
+		agentStatus = getAgentStatus()
 	}
 
 	// ── Parse input fields ──────────────────────────────
@@ -801,10 +829,31 @@ func main() {
 	if agentStatus.Active > 0 || agentStatus.Completed > 0 {
 		parts := []string{}
 		if agentStatus.Active > 0 {
-			parts = append(parts, orange+fmt.Sprintf("%d running", agentStatus.Active)+reset)
+			label := fmt.Sprintf("%d running", agentStatus.Active)
+			if len(agentStatus.RunningNames) > 0 {
+				names := filterNonEmpty(agentStatus.RunningNames)
+				if len(names) > 3 {
+					names = append(names[:3], "…")
+				}
+				if len(names) > 0 {
+					label += " " + dim + "(" + strings.Join(names, ", ") + ")" + reset
+				}
+			}
+			parts = append(parts, orange+label+reset)
 		}
 		if agentStatus.Completed > 0 {
-			parts = append(parts, green+fmt.Sprintf("%d done", agentStatus.Completed)+reset)
+			label := fmt.Sprintf("%d done", agentStatus.Completed)
+			if len(agentStatus.DoneNames) > 0 {
+				names := filterNonEmpty(agentStatus.DoneNames)
+				// Show only last 3 completed
+				if len(names) > 3 {
+					names = names[len(names)-3:]
+				}
+				if len(names) > 0 {
+					label += " " + dim + "(" + strings.Join(names, ", ") + ")" + reset
+				}
+			}
+			parts = append(parts, green+label+reset)
 		}
 		agentLine = "🤖 " + strings.Join(parts, sep)
 	}

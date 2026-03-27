@@ -18,9 +18,15 @@ mkdir -p "$TRACK_DIR"
 # PPID is the Claude Code process that spawned this hook
 TRACK_FILE="${TRACK_DIR}/agents-${PPID}.json"
 
+# Extract agent description from tool_input
+DESC=$(echo "$INPUT" | grep -o '"description":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
+
+# Detect hook type via hook_event_name field (set by Claude Code)
+HOOK_TYPE=$(echo "$INPUT" | grep -o '"hook_event_name":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
+
 # Initialize if missing
 if [ ! -f "$TRACK_FILE" ]; then
-    echo '{"active":0,"completed":0}' > "$TRACK_FILE"
+    echo '{"active":0,"completed":0,"running_names":[],"done_names":[]}' > "$TRACK_FILE"
 fi
 
 # Read current counts
@@ -29,19 +35,38 @@ COMPLETED=$(grep -o '"completed":[0-9]*' "$TRACK_FILE" | cut -d: -f2 || echo "0"
 ACTIVE=${ACTIVE:-0}
 COMPLETED=${COMPLETED:-0}
 
-# Detect hook type via hook_event_name field (set by Claude Code)
-HOOK_TYPE=$(echo "$INPUT" | grep -o '"hook_event_name":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-
-case "$HOOK_TYPE" in
-    PreToolUse)
-        ACTIVE=$((ACTIVE + 1))
-        ;;
-    PostToolUse)
-        if [ "$ACTIVE" -gt 0 ]; then
-            ACTIVE=$((ACTIVE - 1))
-        fi
-        COMPLETED=$((COMPLETED + 1))
-        ;;
-esac
-
-echo "{\"active\":${ACTIVE},\"completed\":${COMPLETED}}" > "$TRACK_FILE"
+# Use jq for array manipulation if available, otherwise just track counts
+if command -v jq >/dev/null 2>&1; then
+    case "$HOOK_TYPE" in
+        PreToolUse)
+            ACTIVE=$((ACTIVE + 1))
+            jq --arg desc "$DESC" \
+                '.active = (.active + 1) | .running_names = (.running_names + [$desc])' \
+                "$TRACK_FILE" > "${TRACK_FILE}.tmp" && mv "${TRACK_FILE}.tmp" "$TRACK_FILE"
+            ;;
+        PostToolUse)
+            if [ "$ACTIVE" -gt 0 ]; then
+                ACTIVE=$((ACTIVE - 1))
+            fi
+            COMPLETED=$((COMPLETED + 1))
+            jq --arg desc "$DESC" \
+                '.active = ([.active - 1, 0] | max) | .completed = (.completed + 1) | .running_names = (.running_names - [$desc]) | .done_names = (.done_names + [$desc])' \
+                "$TRACK_FILE" > "${TRACK_FILE}.tmp" && mv "${TRACK_FILE}.tmp" "$TRACK_FILE"
+            ;;
+        *)
+            ;;
+    esac
+else
+    case "$HOOK_TYPE" in
+        PreToolUse)
+            ACTIVE=$((ACTIVE + 1))
+            ;;
+        PostToolUse)
+            if [ "$ACTIVE" -gt 0 ]; then
+                ACTIVE=$((ACTIVE - 1))
+            fi
+            COMPLETED=$((COMPLETED + 1))
+            ;;
+    esac
+    echo "{\"active\":${ACTIVE},\"completed\":${COMPLETED},\"running_names\":[],\"done_names\":[]}" > "$TRACK_FILE"
+fi
