@@ -174,4 +174,3 @@ make uninstall
 ```
 
 This restores any previous statusline configuration from backup.
-# PR link test
