@@ -657,6 +657,16 @@ func nextMonthFirstDay() string {
 }
 
 func main() {
+	if len(os.Args) > 1 {
+		if err := runCockpitMode(os.Args[1:]); err != errNotCockpit {
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
+
 	// Resolve and apply theme early so colors are available everywhere
 	themeName := resolveTheme()
 	applyTheme(themeName)

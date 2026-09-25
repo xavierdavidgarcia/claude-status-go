@@ -138,6 +138,27 @@ Parses `git status --porcelain` to show:
 
 For extra usage, shows daily spend rate and projected monthly total. Only displayed after day 1 of the month. Projection color: green (<80% of limit), yellow (80-100%), red (over limit).
 
+## Cockpit (tmux)
+
+Every running Claude Code session, across all tmux sessions and Claude profiles,
+in one list: what needs you (permission prompts), what's working, what's idle.
+
+```tmux
+bind g run-shell '~/.claude/claude-status-go cockpit "#{session_name}"'
+bind G display-popup -E -w 80% -h 70% '~/.claude/claude-status-go popup'
+set -ag status-right ' #(~/.claude/claude-status-go count)'
+```
+
+- `prefix g` opens a `cockpit` window: agent list on the left; Enter or click
+  swaps the agent's real pane in on the right. `tab` focuses it, `g` goes to its
+  own window, `q` returns it and closes the cockpit.
+- `prefix G` opens a popup: Enter jumps to the agent.
+- Both: `p` prompt (refused while the agent is at a permission prompt or in a
+  shell), `space` mark several, `n` new agent in a git worktree, `/` filter.
+
+Don't `kill-window` the cockpit while an agent is shown in it: tmux kills that
+agent too. Use `q`.
+
 ## Requirements
 
 - `jq` — used by the installer to update `settings.json`

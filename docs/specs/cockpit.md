@@ -111,9 +111,11 @@ set -ag status-right ' #(claude-status-go count)'
 
 ## Phases
 
-**0. Verify (first hour):** start a Claude session in default permission mode,
-trigger a Bash permission prompt, confirm the registry shows `waiting`. Decides
-whether the MVP needs hooks for "needs you".
+**0. Verify — done 2026-09-25:** on a Bash permission prompt the registry shows
+`status: "waiting"`, `waitingFor: "permission prompt"` within ~1 s and returns
+to `idle` once answered; `procStart` is field 22 of `/proc/<pid>/stat`; the file
+is removed on exit and absent until the folder is trusted. The MVP needs no
+hooks for "needs you".
 
 **1. MVP:** discovery + state from registry, popup (list, filter, jump), count
 segment, cockpit window with swap-in and placeholder, guarded prompt to one
