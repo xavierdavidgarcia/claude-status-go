@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/xgarcia/claude-status-go/pkg/tmux"
 )
@@ -23,19 +24,36 @@ type State struct {
 }
 
 type Cockpit struct {
-	T     *tmux.Client
-	Path  string
-	State State
+	T       *tmux.Client
+	Session string
+	Path    string
+	State   State
 }
 
-func New(t *tmux.Client) *Cockpit {
+// New returns the cockpit of a tmux session; each session has its own.
+func New(t *tmux.Client, session string) *Cockpit {
 	dir := os.Getenv("XDG_RUNTIME_DIR")
 	if dir == "" {
 		dir = os.TempDir()
 	}
-	c := &Cockpit{T: t, Path: filepath.Join(dir, "claude-cockpit", "cockpit.json")}
+	name := strings.Map(func(r rune) rune {
+		if r == '/' || r == '\x00' {
+			return '_'
+		}
+		return r
+	}, session)
+	c := &Cockpit{T: t, Session: session, Path: filepath.Join(dir, "claude-cockpit", "cockpit-"+name+".json")}
 	c.load()
 	return c
+}
+
+// CurrentSession is the session of the pane or client we run in.
+func CurrentSession(t *tmux.Client) (string, error) {
+	s, err := t.Display(os.Getenv("TMUX_PANE"), "#{session_name}")
+	if err != nil {
+		return "", fmt.Errorf("not inside tmux: %w", err)
+	}
+	return s, nil
 }
 
 func (c *Cockpit) load() {
@@ -56,27 +74,28 @@ func (c *Cockpit) save() error {
 	return os.Rename(tmp, c.Path)
 }
 
-func self() string {
+const sidebarWidth = "42"
+
+// cmd is the shell command running this binary in mode for this session.
+func (c *Cockpit) cmd(mode string) string {
 	exe, err := os.Executable()
 	if err != nil {
-		return "claude-status-go"
+		exe = "claude-status-go"
 	}
-	return exe
+	return shellQuote(exe) + " " + mode + " " + shellQuote(c.Session)
 }
 
-// Open focuses the cockpit window in session (default: the current one),
-// creating it if needed.
-func (c *Cockpit) Open(session string) error {
-	if session == "" {
-		var err error
-		if session, err = c.T.Display("", "#{session_name}"); err != nil {
-			return fmt.Errorf("not inside tmux: %w", err)
-		}
-	}
+// Toggle opens the session's cockpit window, or closes it when the client is
+// already looking at it (currentWindow is the client's window id).
+func (c *Cockpit) Toggle(currentWindow string) error {
+	session := c.Session
 	if id := c.T.FindWindow(session, WindowName); id != "" {
+		if id == currentWindow {
+			return c.Close()
+		}
 		c.load()
 		if _, ok := c.T.Panes()[c.State.Sidebar]; !ok {
-			sidebar, err := c.T.SplitLeft(c.State.Slot, "36", self()+" sidebar")
+			sidebar, err := c.T.SplitLeft(c.State.Slot, sidebarWidth, c.cmd("sidebar"))
 			if err != nil {
 				return err
 			}
@@ -86,11 +105,11 @@ func (c *Cockpit) Open(session string) error {
 		return c.T.SelectWindow(id)
 	}
 	c.Restore() // a pane left borrowed by a cockpit that no longer exists
-	slot, err := c.T.NewWindow(session+":", WindowName, "", self()+" placeholder")
+	slot, err := c.T.NewWindow(session+":", WindowName, "", c.cmd("placeholder"))
 	if err != nil {
 		return err
 	}
-	sidebar, err := c.T.SplitLeft(slot, "36", self()+" sidebar")
+	sidebar, err := c.T.SplitLeft(slot, sidebarWidth, c.cmd("sidebar"))
 	if err != nil {
 		return err
 	}

@@ -28,21 +28,24 @@ type Pane struct {
 	Window     string // "@8"
 	WindowName string
 	Index      string // window index
+	Active     bool   // active pane of its window
+	Path       string // pane_current_path
 }
 
 func (p Pane) Location() string { return p.Session + ":" + p.Index }
 
 // Panes maps pane id to its current location.
 func (c *Client) Panes() map[string]Pane {
-	out, err := c.R.Run("list-panes", "-a", "-F", "#{pane_id}\t#{session_name}\t#{window_id}\t#{window_index}\t#{window_name}")
+	out, err := c.R.Run("list-panes", "-a", "-F",
+		"#{pane_id}\t#{session_name}\t#{window_id}\t#{window_index}\t#{window_name}\t#{pane_active}\t#{pane_current_path}")
 	panes := map[string]Pane{}
 	if err != nil {
 		return panes
 	}
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) == 5 {
-			panes[f[0]] = Pane{ID: f[0], Session: f[1], Window: f[2], Index: f[3], WindowName: f[4]}
+		if len(f) == 7 {
+			panes[f[0]] = Pane{ID: f[0], Session: f[1], Window: f[2], Index: f[3], WindowName: f[4], Active: f[5] == "1", Path: f[6]}
 		}
 	}
 	return panes

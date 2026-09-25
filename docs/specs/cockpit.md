@@ -9,9 +9,13 @@ ones need you, and act on them without hunting through ~50 windows.
 
 Two surfaces, same binary:
 
-- **Popup** (`prefix+G`): quick list, filter, jump, close.
-- **Cockpit window** (`prefix+g`): agent list on the left; selecting an agent swaps its real
-  pane in on the right, so you watch and type into it live.
+- **Popup** (`prefix+G`): the current session's tabs and agents; jump, close.
+- **Cockpit window** (`prefix+g`, toggles): tree on the left; selecting an agent
+  or tab swaps its real pane in on the right, so you watch and type into it
+  live. A git panel (changes / log / worktrees) sits under the tree.
+
+Both are scoped to the current tmux session, shown as a herdr-style tree:
+session → tab ("space") → agents; `a` shows every session.
 
 Plus a tmux status segment (`⚠ 2 ● 5`) and desktop notifications.
 
@@ -102,10 +106,11 @@ Multi-send shows the recipient list and reports per-target success.
 ## tmux setup (installed by `make install`, opt-in)
 
 Prefix here is `C-a`; `a` is taken (last-window), `g`/`G` are free.
+`display-popup` doesn't expand formats, hence `run-shell` passing the session.
 
 ```tmux
-bind g run-shell 'claude-status-go cockpit'
-bind G display-popup -E -w 80% -h 70% 'claude-status-go popup'
+bind g run-shell 'claude-status-go cockpit "#{session_name}" "#{window_id}"'
+bind G run-shell 'tmux display-popup -c "#{client_name}" -E -w 80% -h 70% "claude-status-go popup \"#{session_name}\""'
 set -ag status-right ' #(claude-status-go count)'
 ```
 

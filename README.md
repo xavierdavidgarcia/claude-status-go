@@ -140,21 +140,24 @@ For extra usage, shows daily spend rate and projected monthly total. Only displa
 
 ## Cockpit (tmux)
 
-Every running Claude Code session, across all tmux sessions and Claude profiles,
-in one list: what needs you (permission prompts), what's working, what's idle.
+Your tmux session as a tree of tabs and the Claude agents in them, with what
+needs you (permission prompts), what's working, what's idle.
 
 ```tmux
-bind g run-shell '~/.claude/claude-status-go cockpit "#{session_name}"'
-bind G display-popup -E -w 80% -h 70% '~/.claude/claude-status-go popup'
+bind g run-shell '~/.claude/claude-status-go cockpit "#{session_name}" "#{window_id}"'
+bind G run-shell 'tmux display-popup -c "#{client_name}" -E -w 80% -h 70% "~/.claude/claude-status-go popup \"#{session_name}\""'
 set -ag status-right ' #(~/.claude/claude-status-go count)'
 ```
 
-- `prefix g` opens a `cockpit` window: agent list on the left; Enter or click
-  swaps the agent's real pane in on the right. `tab` focuses it, `g` goes to its
-  own window, `q` returns it and closes the cockpit.
-- `prefix G` opens a popup: Enter jumps to the agent.
-- Both: `p` prompt (refused while the agent is at a permission prompt or in a
-  shell), `space` mark several, `n` new agent in a git worktree, `/` filter.
+- `prefix g` toggles a `cockpit` window: the tree on the left, and Enter or a
+  click swaps the selected agent's (or tab's) real pane in on the right. `tab`
+  focuses it, `g` goes to its own window, `q` or `prefix g` again returns it and
+  closes the cockpit. The bottom panel shows the selection's git state: changes,
+  log and worktrees (`v` cycles).
+- `prefix G` opens a popup of the current session: Enter jumps there.
+- Both: `a` all sessions, `!` next agent that needs you, `p` prompt (refused
+  while the agent is at a permission prompt or in a shell), `space` mark
+  several, `n` new agent in a git worktree, `/` filter.
 
 Don't `kill-window` the cockpit while an agent is shown in it: tmux kills that
 agent too. Use `q`.

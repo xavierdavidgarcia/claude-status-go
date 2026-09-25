@@ -14,9 +14,9 @@ import (
 
 // Placeholder runs in the slot pane. While an agent is borrowed, the slot sits
 // in that agent's home window; Enter there brings the agent back.
-func Placeholder() error {
+func Placeholder(session string) error {
 	t := tmux.New()
-	_, err := tea.NewProgram(&placeholder{cp: New(t), t: t, self: os.Getenv("TMUX_PANE")}, tea.WithAltScreen()).Run()
+	_, err := tea.NewProgram(&placeholder{cp: New(t, session), t: t, self: os.Getenv("TMUX_PANE")}, tea.WithAltScreen()).Run()
 	return err
 }
 
