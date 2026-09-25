@@ -17,11 +17,12 @@ import (
 	"github.com/xgarcia/claude-status-go/pkg/tmux"
 )
 
-type Mode int
+type focus int
 
 const (
-	Popup Mode = iota
-	Sidebar
+	fSpaces focus = iota
+	fAgents
+	fGit
 )
 
 type inputKind int
@@ -34,52 +35,47 @@ const (
 	spawnDirInput
 )
 
-const gitTTL = 5 * time.Second
-
-var (
-	styleNeeds   = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5f5f")).Bold(true)
-	styleWorking = lipgloss.NewStyle().Foreground(lipgloss.Color("#00d787"))
-	styleShell   = lipgloss.NewStyle().Foreground(lipgloss.Color("#5fafff"))
-	styleDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))
-	styleHeader  = lipgloss.NewStyle().Foreground(lipgloss.Color("#b48cff")).Bold(true)
-	styleAdd     = lipgloss.NewStyle().Foreground(lipgloss.Color("#00d787"))
-	styleDel     = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5f5f"))
-	styleMod     = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffd75f"))
-	styleCursor  = lipgloss.NewStyle().Reverse(true)
+const (
+	gitTTL    = 5 * time.Second
+	branchTTL = 15 * time.Second
+	showDelay = 120 * time.Millisecond // let the cursor settle before swapping panes
 )
 
-var glyphs = map[agents.State]string{
-	agents.NeedsYou: styleNeeds.Render("⚠"),
-	agents.Working:  styleWorking.Render("●"),
-	agents.Shell:    styleShell.Render("$"),
-	agents.Idle:     styleDim.Render("○"),
-	agents.Unknown:  styleDim.Render("?"),
+var gitTabs = []string{"changes", "log", "worktrees"}
+
+type (
+	scanMsg struct {
+		agents []agents.Agent
+		panes  map[string]tmux.Pane
+	}
+	gitMsg    gitinfo.Info
+	branchMsg struct{ dir, branch string }
+	showMsg   struct{ pane string }
+	tickMsg   struct{}
+	spinMsg   struct{}
+)
+
+type branch struct {
+	name string
+	at   time.Time
 }
-
-func plainGlyph(s agents.State) string { return [...]string{"⚠", "●", "$", "○", "?"}[s] }
-
-type scanMsg struct {
-	agents []agents.Agent
-	panes  map[string]tmux.Pane
-}
-
-type gitMsg gitinfo.Info
-
-type tickMsg struct{}
 
 type model struct {
-	mode    Mode
-	session string
-	all     bool // show every tmux session
+	session string // tmux session the cockpit lives in
 	scanner *agents.Scanner
 	t       *tmux.Client
 	cp      *Cockpit
 
 	agents []agents.Agent
 	panes  map[string]tmux.Pane
-	rows   []row
-	cursor string // row key
-	marked map[string]bool
+	spaces []space
+
+	focus    focus
+	spaceSel string // space name
+	agentSel string // agent key
+	gitTab   int
+	gitSel   [3]int
+	marked   map[string]bool
 
 	filter   string
 	input    inputKind
@@ -87,16 +83,21 @@ type model struct {
 	spawnFor string
 	flash    string
 
-	git     map[string]gitinfo.Info
-	loading map[string]bool
-	gitView int // 0 changes, 1 log, 2 worktrees
+	git      map[string]gitinfo.Info
+	loading  map[string]bool
+	branches map[string]branch
 
 	width, height int
-	lineRows      []int // row index per screen line, -1 when not a row
-	offset        int
+	frame         int
+	clicks        []click // what each screen line selects
 }
 
-func Run(mode Mode, session string) error {
+type click struct {
+	focus focus
+	index int // -1: nothing
+}
+
+func Run(session string) error {
 	t := tmux.New()
 	if session == "" {
 		var err error
@@ -104,8 +105,9 @@ func Run(mode Mode, session string) error {
 			return err
 		}
 	}
-	m := &model{mode: mode, session: session, scanner: agents.NewScanner(), t: t, cp: New(t, session),
-		marked: map[string]bool{}, git: map[string]gitinfo.Info{}, loading: map[string]bool{}}
+	m := &model{session: session, scanner: agents.NewScanner(), t: t, cp: New(t, session),
+		spaceSel: session, focus: fAgents, marked: map[string]bool{},
+		git: map[string]gitinfo.Info{}, loading: map[string]bool{}, branches: map[string]branch{}}
 	m.apply(m.scan())
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	// kill-pane sends SIGHUP; quit cleanly so the borrowed agent goes home.
@@ -113,15 +115,11 @@ func Run(mode Mode, session string) error {
 	signal.Notify(hup, syscall.SIGHUP)
 	go func() { <-hup; p.Quit() }()
 	_, err := p.Run()
-	if mode == Sidebar {
-		m.cp.Close()
-	}
+	m.cp.Close()
 	return err
 }
 
-func (m *model) scan() scanMsg {
-	return scanMsg{agents: m.scanner.Scan(), panes: m.t.Panes()}
-}
+func (m *model) scan() scanMsg { return scanMsg{agents: m.scanner.Scan(), panes: m.t.Panes()} }
 
 func key(a agents.Agent) string {
 	if a.PaneID != "" {
@@ -130,76 +128,64 @@ func key(a agents.Agent) string {
 	return fmt.Sprintf("pid:%d", a.PID)
 }
 
-func (m *model) scope() string {
-	if m.all {
-		return ""
-	}
-	return m.session
-}
-
 func (m *model) apply(s scanMsg) {
 	m.agents, m.panes = s.agents, s.panes
 	m.cp.load()
-	m.rows = buildTree(treeInput{agents: m.agents, panes: m.panes, scope: m.scope(),
+	m.spaces = buildSpaces(spaceInput{agents: m.agents, panes: m.panes,
 		borrowed: m.cp.State.Borrowed, slot: m.cp.State.Slot, filter: m.filter})
-	for _, r := range m.rows {
-		if r.key == m.cursor {
+	if _, ok := m.space(); !ok && len(m.spaces) > 0 {
+		m.spaceSel = m.spaces[0].Name
+	}
+	sp, _ := m.space()
+	for _, it := range sp.Agents {
+		if key(it.Agent) == m.agentSel {
 			return
 		}
 	}
-	m.cursor = ""
-	for _, r := range m.rows {
-		if r.kind == agentRow {
-			m.cursor = r.key
-			return
+	m.agentSel = ""
+	if len(sp.Agents) > 0 {
+		m.agentSel = key(sp.Agents[0].Agent)
+	}
+}
+
+func (m *model) space() (space, bool) {
+	for _, sp := range m.spaces {
+		if sp.Name == m.spaceSel {
+			return sp, true
 		}
 	}
-	if len(m.rows) > 0 {
-		m.cursor = m.rows[0].key
-	}
+	return space{}, false
 }
 
-func (m *model) current() (row, bool) {
-	for _, r := range m.rows {
-		if r.key == m.cursor {
-			return r, true
+func (m *model) agent() (item, bool) {
+	sp, _ := m.space()
+	for _, it := range sp.Agents {
+		if key(it.Agent) == m.agentSel {
+			return it, true
 		}
 	}
-	return row{}, false
+	return item{}, false
 }
 
-// target is the pane a row stands for: the agent's, or the window's active one.
-func (r row) target() (pane, name string) {
-	switch r.kind {
-	case agentRow:
-		return r.agent.PaneID, r.agent.Name
-	case windowRow:
-		return r.window.ActivePane, r.window.Name
+// dir is what the git panel describes: the agent's repo, else the space's.
+func (m *model) dir() string {
+	if it, ok := m.agent(); ok {
+		return it.Cwd
 	}
-	return "", ""
+	sp, _ := m.space()
+	return sp.Path
 }
 
-func (r row) dir() string {
-	switch r.kind {
-	case agentRow:
-		return r.agent.Cwd
-	case windowRow:
-		return r.window.Path
-	}
-	return ""
+// ── commands (background work) ──────────────────────────
+
+func tick() tea.Cmd { return tea.Tick(time.Second, func(time.Time) tea.Msg { return tickMsg{} }) }
+
+func spin() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return spinMsg{} })
 }
 
-func tick() tea.Cmd {
-	return tea.Tick(time.Second, func(time.Time) tea.Msg { return tickMsg{} })
-}
-
-// loadGit fetches git state for the selected row in the background.
 func (m *model) loadGit() tea.Cmd {
-	r, ok := m.current()
-	if m.mode != Sidebar || !ok {
-		return nil
-	}
-	dir := r.dir()
+	dir := m.dir()
 	if dir == "" || m.loading[dir] || time.Since(m.git[dir].At) < gitTTL {
 		return nil
 	}
@@ -207,114 +193,210 @@ func (m *model) loadGit() tea.Cmd {
 	return func() tea.Msg { return gitMsg(gitinfo.Load(dir)) }
 }
 
-func (m *model) Init() tea.Cmd { return tea.Batch(tick(), m.loadGit()) }
+func (m *model) loadBranches() tea.Cmd {
+	var cmds []tea.Cmd
+	for _, sp := range m.spaces {
+		dir := sp.Path
+		if dir == "" || time.Since(m.branches[dir].at) < branchTTL {
+			continue
+		}
+		m.branches[dir] = branch{name: m.branches[dir].name, at: time.Now()}
+		cmds = append(cmds, func() tea.Msg { return branchMsg{dir, gitinfo.Branch(dir)} })
+	}
+	return tea.Batch(cmds...)
+}
+
+// follow schedules showing the selection once the cursor has settled.
+func (m *model) follow() tea.Cmd {
+	pane := m.previewPane()
+	if pane == "" || pane == m.cp.State.Borrowed {
+		return nil
+	}
+	return tea.Tick(showDelay, func(time.Time) tea.Msg { return showMsg{pane} })
+}
+
+func (m *model) previewPane() string {
+	if m.focus == fSpaces {
+		sp, _ := m.space()
+		p, _ := sp.preview()
+		return p
+	}
+	if it, ok := m.agent(); ok {
+		return it.PaneID
+	}
+	return ""
+}
+
+func (m *model) nameOf(pane string) string {
+	for _, a := range m.agents {
+		if a.PaneID == pane {
+			return a.Name
+		}
+	}
+	if p, ok := m.panes[pane]; ok {
+		return p.WindowName
+	}
+	return pane
+}
+
+// ── update ──────────────────────────────────────────────
+
+func (m *model) Init() tea.Cmd {
+	return tea.Batch(tick(), spin(), m.loadGit(), m.loadBranches(), m.follow())
+}
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+	case spinMsg:
+		m.frame++
+		return m, spin()
 	case tickMsg:
 		return m, tea.Batch(func() tea.Msg { return m.scan() }, tick())
 	case scanMsg:
 		m.apply(msg)
-		return m, m.loadGit()
+		return m, tea.Batch(m.loadGit(), m.loadBranches())
 	case gitMsg:
 		m.git[msg.Dir] = gitinfo.Info(msg)
 		delete(m.loading, msg.Dir)
-	case tea.MouseMsg:
-		switch {
-		case msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft:
-			return m.click(msg.Y)
-		case msg.Button == tea.MouseButtonWheelUp:
-			m.move(-1)
-		case msg.Button == tea.MouseButtonWheelDown:
-			m.move(1)
+	case branchMsg:
+		m.branches[msg.dir] = branch{name: msg.branch, at: time.Now()}
+	case showMsg:
+		if msg.pane == m.previewPane() { // still selected
+			if err := m.cp.Show(msg.pane, m.nameOf(msg.pane)); err != nil {
+				m.flash = err.Error()
+			}
 		}
-		return m, m.loadGit()
+	case tea.MouseMsg:
+		return m, m.mouse(msg)
 	case tea.KeyMsg:
 		if m.input != noInput {
 			return m.typing(msg)
 		}
-		next, cmd := m.command(msg.String())
-		return next, tea.Batch(cmd, m.loadGit())
+		return m.key(msg.String())
 	}
 	return m, nil
 }
 
-func (m *model) move(d int) {
-	for i, r := range m.rows {
-		if r.key == m.cursor {
-			if j := i + d; j >= 0 && j < len(m.rows) {
-				m.cursor = m.rows[j].key
+func (m *model) mouse(msg tea.MouseMsg) tea.Cmd {
+	switch {
+	case msg.Button == tea.MouseButtonWheelUp:
+		return m.move(-1)
+	case msg.Button == tea.MouseButtonWheelDown:
+		return m.move(1)
+	case msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft:
+		return nil
+	}
+	if msg.Y < 0 || msg.Y >= len(m.clicks) || m.clicks[msg.Y].index < 0 {
+		return nil
+	}
+	c := m.clicks[msg.Y]
+	m.focus = c.focus
+	switch c.focus {
+	case fSpaces:
+		m.spaceSel = m.spaces[c.index].Name
+		m.apply(scanMsg{m.agents, m.panes})
+	case fAgents:
+		sp, _ := m.space()
+		m.agentSel = key(sp.Agents[c.index].Agent)
+	case fGit:
+		m.gitSel[m.gitTab] = c.index
+	}
+	return tea.Batch(m.follow(), m.loadGit())
+}
+
+// move steps the cursor of the focused section.
+func (m *model) move(d int) tea.Cmd {
+	switch m.focus {
+	case fSpaces:
+		for i, sp := range m.spaces {
+			if sp.Name == m.spaceSel {
+				if j := i + d; j >= 0 && j < len(m.spaces) {
+					m.spaceSel = m.spaces[j].Name
+					m.agentSel = ""
+					m.apply(scanMsg{m.agents, m.panes})
+				}
+				break
 			}
-			return
 		}
+	case fAgents:
+		sp, _ := m.space()
+		for i, it := range sp.Agents {
+			if key(it.Agent) == m.agentSel {
+				if j := i + d; j >= 0 && j < len(sp.Agents) {
+					m.agentSel = key(sp.Agents[j].Agent)
+				}
+				break
+			}
+		}
+	case fGit:
+		n := len(m.gitItems())
+		m.gitSel[m.gitTab] = min(max(m.gitSel[m.gitTab]+d, 0), max(n-1, 0))
+		return nil
 	}
+	return tea.Batch(m.follow(), m.loadGit())
 }
 
-func (m *model) click(y int) (tea.Model, tea.Cmd) {
-	if y < 0 || y >= len(m.lineRows) || m.lineRows[y] < 0 || m.lineRows[y] >= len(m.rows) {
-		return m, nil
-	}
-	m.cursor = m.rows[m.lineRows[y]].key
-	next, cmd := m.command("enter")
-	return next, tea.Batch(cmd, m.loadGit())
-}
-
-func (m *model) command(k string) (tea.Model, tea.Cmd) {
+func (m *model) key(k string) (tea.Model, tea.Cmd) {
 	m.flash = ""
-	r, ok := m.current()
 	switch k {
-	case "q", "ctrl+c", "esc":
-		if k == "esc" && m.filter != "" {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		if m.filter != "" {
 			m.filter = ""
 			m.apply(scanMsg{m.agents, m.panes})
 			return m, nil
 		}
 		return m, tea.Quit
 	case "j", "down":
-		m.move(1)
+		return m, m.move(1)
 	case "k", "up":
-		m.move(-1)
-	case "!":
-		m.nextNeedsYou()
+		return m, m.move(-1)
+	case "tab":
+		m.focus = (m.focus + 1) % 3
+		return m, m.follow()
+	case "shift+tab":
+		m.focus = (m.focus + 2) % 3
+		return m, m.follow()
+	case "left", "h":
+		if m.focus == fGit {
+			m.gitTab = (m.gitTab + 2) % 3
+		} else if m.focus == fAgents {
+			m.focus = fSpaces
+		}
+	case "right", "l":
+		switch m.focus {
+		case fGit:
+			m.gitTab = (m.gitTab + 1) % 3
+		case fSpaces:
+			m.focus = fAgents
+			return m, m.follow()
+		case fAgents:
+			m.typeInto()
+		}
 	case "enter":
-		pane, name := r.target()
-		if !ok || pane == "" {
-			if r.kind == agentRow {
-				m.flash = "not running in tmux"
-			}
-			return m, nil
-		}
-		if m.mode == Popup {
-			m.t.Jump(pane)
-			return m, tea.Quit
-		}
-		if err := m.cp.Show(pane, name); err != nil {
-			m.flash = err.Error()
-		}
-		m.apply(scanMsg{m.agents, m.panes})
-	case "tab", "l", "right":
-		if m.mode == Sidebar && m.cp.State.Borrowed != "" {
-			m.t.SelectPane(m.cp.State.Borrowed)
+		switch m.focus {
+		case fSpaces:
+			m.focus = fAgents
+			return m, m.follow()
+		case fAgents:
+			m.typeInto()
+		case fGit:
+			return m, m.openGitItem()
 		}
 	case "g":
-		if pane, _ := r.target(); ok && pane != "" {
+		if pane := m.previewPane(); pane != "" {
 			m.cp.Restore()
 			m.t.Jump(pane)
-			if m.mode == Popup {
-				return m, tea.Quit
-			}
 		}
-	case "a":
-		m.all = !m.all
-		m.apply(scanMsg{m.agents, m.panes})
-	case "v":
-		m.gitView = (m.gitView + 1) % 3
+	case "!":
+		return m, m.nextNeedsYou()
 	case " ":
-		if ok && r.kind == agentRow {
-			m.marked[r.key] = !m.marked[r.key]
-			m.move(1)
+		if it, ok := m.agent(); ok {
+			m.marked[key(it.Agent)] = !m.marked[key(it.Agent)]
+			return m, m.move(1)
 		}
 	case "/":
 		m.input, m.buf = filterInput, m.filter
@@ -328,21 +410,38 @@ func (m *model) command(k string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *model) nextNeedsYou() {
-	start := 0
-	for i, r := range m.rows {
-		if r.key == m.cursor {
-			start = i + 1
+// typeInto puts the keyboard in the shown agent's pane.
+func (m *model) typeInto() {
+	if it, ok := m.agent(); ok && it.PaneID != "" {
+		m.cp.Show(it.PaneID, it.Name)
+		m.t.SelectPane(it.PaneID)
+	}
+}
+
+func (m *model) nextNeedsYou() tea.Cmd {
+	type pos struct{ sp, ag string }
+	var all []pos
+	cur := -1
+	for _, sp := range m.spaces {
+		for _, it := range sp.Agents {
+			if sp.Name == m.spaceSel && key(it.Agent) == m.agentSel {
+				cur = len(all)
+			}
+			if it.State == agents.NeedsYou || (sp.Name == m.spaceSel && key(it.Agent) == m.agentSel) {
+				all = append(all, pos{sp.Name, key(it.Agent)})
+			}
 		}
 	}
-	for i := range m.rows {
-		r := m.rows[(start+i)%len(m.rows)]
-		if r.kind == agentRow && r.state == agents.NeedsYou {
-			m.cursor = r.key
-			return
+	for i := 1; i <= len(all); i++ {
+		p := all[(max(cur, 0)+i)%len(all)]
+		if p.sp == m.spaceSel && p.ag == m.agentSel {
+			continue
 		}
+		m.spaceSel, m.agentSel, m.focus = p.sp, p.ag, fAgents
+		return tea.Batch(m.follow(), m.loadGit())
 	}
 	m.flash = "nobody needs you"
+	return nil
 }
 
 func (m *model) typing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -381,10 +480,7 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 	case spawnNameInput:
 		if buf != "" {
 			m.spawnFor = buf
-			m.input = spawnDirInput
-			if r, ok := m.current(); ok {
-				m.buf = r.dir()
-			}
+			m.input, m.buf = spawnDirInput, m.dir()
 		}
 	case spawnDirInput:
 		m.flash = m.spawn(m.spawnFor, buf)
@@ -392,7 +488,7 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// targets are the marked agents, or the agent under the cursor.
+// targets are the marked agents, or the selected one.
 func (m *model) targets() []agents.Agent {
 	var out []agents.Agent
 	for _, a := range m.agents {
@@ -400,8 +496,8 @@ func (m *model) targets() []agents.Agent {
 			out = append(out, a)
 		}
 	}
-	if r, ok := m.current(); len(out) == 0 && ok && r.kind == agentRow {
-		out = append(out, r.agent)
+	if it, ok := m.agent(); len(out) == 0 && ok {
+		out = append(out, it.Agent)
 	}
 	return out
 }
@@ -441,22 +537,106 @@ func (m *model) spawn(name, dir string) string {
 	}
 	cmd := fmt.Sprintf("claude -w %s -n %s", shellQuote(name), shellQuote(name))
 	// Keep the Claude profile of the agent the new one was spawned from.
-	if r, ok := m.current(); ok && r.kind == agentRow && r.agent.ConfigDir != "" {
-		cmd = "CLAUDE_CONFIG_DIR=" + shellQuote(r.agent.ConfigDir) + " " + cmd
+	if it, ok := m.agent(); ok && it.ConfigDir != "" {
+		cmd = "CLAUDE_CONFIG_DIR=" + shellQuote(it.ConfigDir) + " " + cmd
 	}
-	pane, err := m.t.NewWindow(m.session+":", name, dir, cmd)
+	target := m.spaceSel
+	if target == "" {
+		target = m.session
+	}
+	pane, err := m.t.NewWindow(target+":", name, dir, cmd)
 	if err != nil {
 		return "spawn failed: " + err.Error()
 	}
-	if m.mode == Sidebar {
-		m.cp.Show(pane, name)
-	}
+	m.cp.Show(pane, name)
 	return "started " + name
 }
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// ── git panel items ─────────────────────────────────────
+
+type gitItem struct {
+	file   *gitinfo.File
+	staged bool
+	commit *gitinfo.Commit
+	wt     *gitinfo.Worktree
+}
+
+func (m *model) gitItems() []gitItem {
+	info := m.git[m.dir()]
+	var out []gitItem
+	switch m.gitTab {
+	case 0:
+		for i := range info.Staged {
+			out = append(out, gitItem{file: &info.Staged[i], staged: true})
+		}
+		for i := range info.Unstaged {
+			out = append(out, gitItem{file: &info.Unstaged[i]})
+		}
+		for i := range info.Untracked {
+			out = append(out, gitItem{file: &info.Untracked[i]})
+		}
+	case 1:
+		for i := range info.Log {
+			out = append(out, gitItem{commit: &info.Log[i]})
+		}
+	case 2:
+		for i := range info.Worktrees {
+			out = append(out, gitItem{wt: &info.Worktrees[i]})
+		}
+	}
+	return out
+}
+
+// openGitItem shows a diff or commit in a popup, or goes to a worktree's agent.
+func (m *model) openGitItem() tea.Cmd {
+	items := m.gitItems()
+	i := m.gitSel[m.gitTab]
+	if i >= len(items) {
+		return nil
+	}
+	it, dir := items[i], m.dir()
+	pager := " | less -R"
+	switch {
+	case it.file != nil && it.file.Status == '?':
+		m.popup(dir, "less "+shellQuote(it.file.Path))
+	case it.file != nil:
+		cached := ""
+		if it.staged {
+			cached = " --cached"
+		}
+		m.popup(dir, "git diff --color=always"+cached+" -- "+shellQuote(it.file.Path)+pager)
+	case it.commit != nil:
+		m.popup(dir, "git show --color=always "+it.commit.Hash+pager)
+	case it.wt != nil:
+		for _, sp := range m.spaces {
+			for _, a := range sp.Agents {
+				if a.Cwd == it.wt.Path || strings.HasPrefix(a.Cwd, it.wt.Path+"/") {
+					m.spaceSel, m.agentSel, m.focus = sp.Name, key(a.Agent), fAgents
+					return tea.Batch(m.follow(), m.loadGit())
+				}
+			}
+		}
+		pane, err := m.t.NewWindow(m.session+":", filepath.Base(it.wt.Path), it.wt.Path, "")
+		if err != nil {
+			m.flash = err.Error()
+			return nil
+		}
+		m.cp.Show(pane, filepath.Base(it.wt.Path))
+	}
+	return nil
+}
+
+func (m *model) popup(dir, cmd string) {
+	if err := m.t.Popup(dir, cmd); err != nil {
+		m.flash = "popup: " + err.Error()
+	}
+}
+
+// ── view ────────────────────────────────────────────────
 
 func age(t time.Time) string {
 	if t.IsZero() {
@@ -484,255 +664,307 @@ func trunc(s string, w int) string {
 	return s
 }
 
-// spread puts right at the far edge of a line of the given width.
-func spread(left, right string, width int) string {
-	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
-	return left + strings.Repeat(" ", max(gap, 1)) + right
+// block is a section's rendered lines with what each line selects.
+type block struct {
+	lines []string
+	idx   []int
 }
 
-// ── View ────────────────────────────────────────────────
+func (b *block) add(s string, i int) { b.lines, b.idx = append(b.lines, s), append(b.idx, i) }
 
-func (m *model) View() string {
-	w := max(m.width, 20)
-	if m.mode == Popup {
-		w = min(w, 100) // keep ages next to names in a wide popup
+// fit scrolls b to room lines keeping the lines of item sel visible.
+func (b block) fit(room, sel int) block {
+	if len(b.lines) <= room {
+		return b
 	}
-
-	title := "Claude · " + m.session
-	if m.all {
-		title = "Claude · all sessions"
-	}
-	c := map[agents.State]int{}
-	for _, r := range m.rows {
-		if r.kind == agentRow {
-			c[r.state]++
+	first, last := -1, -1
+	for i, x := range b.idx {
+		if x == sel {
+			if first < 0 {
+				first = i
+			}
+			last = i
 		}
 	}
-	counts := fmt.Sprintf("⚠%d ●%d ○%d", c[agents.NeedsYou], c[agents.Working], c[agents.Idle])
-	head := spread(styleHeader.Render(trunc(title, w-12)), styleDim.Render(counts), w)
+	off := 0
+	if last >= room {
+		off = last - room + 1
+	}
+	if first >= 0 && first < off {
+		off = first
+	}
+	off = min(off, len(b.lines)-room)
+	return block{b.lines[off : off+room], b.idx[off : off+room]}
+}
+
+func (m *model) header(title string, f focus, w int, right []seg) string {
+	st := sDim
+	if m.focus == f {
+		st = sAccent.Bold(true)
+	}
+	return line(w, false, []seg{{st, " " + title}}, right)
+}
+
+func (m *model) View() string {
+	w, h := max(m.width, 24), max(m.height, 12)
+
+	// Spaces: two lines each, at most a third of the screen.
+	var sb block
+	selSpace := 0
+	for i, sp := range m.spaces {
+		sel := sp.Name == m.spaceSel
+		if sel {
+			selSpace = i
+		}
+		hl := sel && m.focus == fSpaces
+		bar := seg{sDim, " "}
+		if sel {
+			bar = seg{sAccent, "▎"}
+		}
+		name := sp.Name
+		if name == "" {
+			name = "outside tmux"
+		}
+		right := []seg{}
+		if n := len(sp.Agents); n > 0 {
+			right = []seg{{sDim, fmt.Sprintf("%d ", n)}, dot(sp.State), {sDim, " "}}
+		}
+		nameStyle := sText
+		if sel || sp.Name == m.session {
+			nameStyle = sBold
+		}
+		sb.add(line(w, hl, []seg{bar, {nameStyle, trunc(name, w-8)}}, right), i)
+		sub := m.branches[sp.Path].name
+		if sub == "" && sp.Path != "" {
+			sub = filepath.Base(sp.Path)
+		}
+		sb.add(line(w, hl, []seg{{sDim, "  "}, {sBranch, trunc(sub, w-4)}}, nil), i)
+	}
+
+	// Agents of the selected space.
+	sp, _ := m.space()
+	var ab block
+	selAgent := -1
+	for i, it := range sp.Agents {
+		sel := key(it.Agent) == m.agentSel
+		if sel {
+			selAgent = i
+		}
+		hl := sel && m.focus == fAgents
+		bar := seg{sDim, " "}
+		if sel {
+			bar = seg{sAccent, "▎"}
+		}
+		mark := " "
+		if m.marked[key(it.Agent)] {
+			mark = "✓"
+		}
+		nameStyle := sBold
+		if it.PaneID != "" && it.PaneID == m.cp.State.Borrowed {
+			nameStyle = sAccent.Bold(true) // the one on screen
+		}
+		word := stateWord(it.State)
+		ab.add(line(w, hl, []seg{bar, stateGlyph(it.State, m.frame), {sDim, mark}, {nameStyle, trunc(it.Name, w-lipgloss.Width(word.text)-6)}},
+			[]seg{word, {sDim, " "}}), i)
+		sub := []seg{{sDim, "    "}, {sSub, trunc(it.Tab, w/2)}}
+		if a := age(it.Since); a != "" {
+			sub = append(sub, seg{sDim, " · " + a})
+		}
+		if it.State == agents.NeedsYou && it.WaitingFor != "" {
+			sub = []seg{{sDim, "    "}, {sRed, trunc(it.WaitingFor, w-5)}}
+		}
+		ab.add(line(w, hl, sub, nil), i)
+	}
+	if len(sp.Agents) == 0 {
+		ab.add(line(w, false, []seg{{sDim, "  no agents here · n to start one"}}, nil), -1)
+	}
+
+	// Git panel of the selection.
+	gitRoom := 0
+	if h >= 26 {
+		gitRoom = h * 35 / 100
+	}
+	gb := m.gitBlock(w)
 
 	foot := m.footer(w)
-	var gitLines []string
-	if m.mode == Sidebar && m.height >= 24 {
-		gitLines = m.gitPanel(w, m.height*2/5)
+	spaceRoom := min(len(sb.lines), max(4, h/3))
+	agentRoom := h - 1 - spaceRoom - 2 - len(foot)
+	if gitRoom > 0 {
+		agentRoom -= gitRoom + 2
+	}
+	agentRoom = max(agentRoom, 2)
+
+	var out []string
+	m.clicks = m.clicks[:0]
+	emit := func(s string, f focus, i int) {
+		out = append(out, s)
+		m.clicks = append(m.clicks, click{f, i})
+	}
+	emitBlock := func(b block, f focus, room int) {
+		for i, l := range b.lines {
+			emit(l, f, b.idx[i])
+		}
+		for range room - len(b.lines) {
+			emit("", f, -1)
+		}
 	}
 
-	list, listRows := m.list(w)
-	room := m.height - 1 - len(gitLines) - len(foot)
-	if m.height == 0 {
-		room = len(list)
+	c := map[agents.State]int{}
+	for _, s := range m.spaces {
+		for _, it := range s.Agents {
+			c[it.State]++
+		}
 	}
-	list, listRows = m.scroll(list, listRows, max(room, 1))
-	for len(list) < room { // keep the git panel anchored at the bottom
-		list, listRows = append(list, ""), append(listRows, -1)
+	summary := []seg{}
+	if c[agents.NeedsYou] > 0 {
+		summary = append(summary, seg{sRed, fmt.Sprintf("! %d  ", c[agents.NeedsYou])})
 	}
-
-	m.lineRows = append([]int{-1}, listRows...)
-	for range len(gitLines) + len(foot) {
-		m.lineRows = append(m.lineRows, -1)
+	summary = append(summary, seg{sYellow, fmt.Sprintf("● %d ", c[agents.Working])})
+	emit(m.header("spaces", fSpaces, w, summary), fSpaces, -1)
+	emitBlock(sb.fit(spaceRoom, selSpace), fSpaces, spaceRoom)
+	emit("", fAgents, -1)
+	emit(m.header("agents", fAgents, w, nil), fAgents, -1)
+	emitBlock(ab.fit(agentRoom, selAgent), fAgents, agentRoom)
+	if gitRoom > 0 {
+		emit("", fGit, -1)
+		emit(m.gitHeader(w), fGit, -1)
+		emitBlock(gb.fit(gitRoom, m.gitSel[m.gitTab]), fGit, gitRoom)
 	}
-	out := append([]string{head}, list...)
-	out = append(out, gitLines...)
-	out = append(out, foot...)
+	for _, l := range foot {
+		emit(l, fGit, -1)
+	}
 	return strings.Join(out, "\n")
 }
 
-func (m *model) list(w int) (lines []string, rowIdx []int) {
-	add := func(s string, i int) { lines, rowIdx = append(lines, s), append(rowIdx, i) }
-	indent := ""
-	if m.all {
-		indent = " "
-	}
-	for i, r := range m.rows {
-		sel := r.key == m.cursor
-		var text string
-		switch r.kind {
-		case sessionRow:
-			name := "session " + r.session
-			if r.session == "" {
-				name = "outside tmux"
+func (m *model) gitHeader(w int) string {
+	var left []seg
+	for i, t := range gitTabs {
+		st := sDim
+		if i == m.gitTab {
+			st = sDim.Bold(true)
+			if m.focus == fGit {
+				st = sAccent.Bold(true)
 			}
-			add("", -1)
-			text = styleHeader.Render("▣ " + name)
-		case windowRow:
-			label := trunc(r.window.Index+" "+r.window.Name, w-len(indent)-4)
-			glyph := ""
-			if r.agentsN > 0 {
-				glyph = glyphs[r.state]
-				if sel {
-					glyph = plainGlyph(r.state)
-				}
-			} else if !sel {
-				label = styleDim.Render(label)
-			}
-			text = spread(indent+label, glyph, w)
-		case agentRow:
-			mark := " "
-			if m.marked[r.key] {
-				mark = "✓"
-			}
-			if m.mode == Sidebar && r.agent.PaneID != "" && r.agent.PaneID == m.cp.State.Borrowed {
-				mark = "▶"
-			}
-			glyph := glyphs[r.state]
-			if sel {
-				glyph = plainGlyph(r.state) // nested colors would cut the highlight short
-			}
-			a := age(r.agent.Since)
-			name := trunc(r.agent.Name, w-len(indent)-8-len(a))
-			text = spread(indent+"  "+mark+glyph+" "+name, a, w)
 		}
-		if sel {
-			text = styleCursor.Render(text)
-		}
-		add(text, i)
-		if r.kind == agentRow && r.state == agents.NeedsYou && r.agent.WaitingFor != "" {
-			add(indent+"     "+styleNeeds.Render(trunc(r.agent.WaitingFor, w-len(indent)-5)), i)
-		}
+		left = append(left, seg{sDim, " "}, seg{st, t})
 	}
-	if len(m.rows) == 0 {
-		add(styleDim.Render("no windows"), -1)
-	}
-	return lines, rowIdx
+	return line(w, false, left, nil)
 }
 
-// scroll keeps the cursor's line visible within room lines.
-func (m *model) scroll(lines []string, rowIdx []int, room int) ([]string, []int) {
-	if len(lines) <= room {
-		m.offset = 0
-		return lines, rowIdx
+func (m *model) gitBlock(w int) block {
+	var b block
+	dir := m.dir()
+	info, have := m.git[dir]
+	switch {
+	case dir == "":
+		b.add(line(w, false, []seg{{sDim, "  nothing selected"}}, nil), -1)
+		return b
+	case !have:
+		b.add(line(w, false, []seg{{sDim, "  …"}}, nil), -1)
+		return b
+	case !info.Repo:
+		b.add(line(w, false, []seg{{sDim, "  " + trunc(filepath.Base(dir)+" is not a git repo", w-3)}}, nil), -1)
+		return b
 	}
-	cur := 0
-	for i, idx := range rowIdx {
-		if idx >= 0 && m.rows[idx].key == m.cursor {
-			cur = i
-			break
+	focused := m.focus == fGit
+	sel := m.gitSel[m.gitTab]
+	num := func(f gitinfo.File) []seg {
+		if f.Status == '?' {
+			return nil
+		}
+		return []seg{{sGreen, fmt.Sprintf("+%d", f.Add)}, {sDim, "/"}, {sRed, fmt.Sprintf("-%d", f.Del)}, {sDim, " "}}
+	}
+	switch m.gitTab {
+	case 0:
+		ab := []seg{}
+		if info.Ahead > 0 {
+			ab = append(ab, seg{sGreen, fmt.Sprintf("↑%d", info.Ahead)})
+		}
+		if info.Behind > 0 {
+			ab = append(ab, seg{sRed, fmt.Sprintf("↓%d", info.Behind)})
+		}
+		add, del, files := info.Totals()
+		b.add(line(w, false, []seg{{sDim, "  "}, {sBranch, trunc(info.Branch, w-10)}}, append(ab, seg{sDim, " "})), -1)
+		b.add(line(w, false, []seg{{sDim, "  "}, {sGreen, fmt.Sprintf("+%d", add)}, {sDim, "/"}, {sRed, fmt.Sprintf("-%d", del)}},
+			[]seg{{sDim, fmt.Sprintf("%d files ", files)}}), -1)
+		idx := 0
+		section := func(title string, fs []gitinfo.File) {
+			if len(fs) == 0 {
+				return
+			}
+			b.add(line(w, false, []seg{{sSub, fmt.Sprintf("  %s (%d)", title, len(fs))}}, nil), -1)
+			for _, f := range fs {
+				st := sPeach
+				switch f.Status {
+				case 'A', '?':
+					st = sGreen
+				case 'D':
+					st = sRed
+				}
+				n := num(f)
+				nw := 0
+				for _, s := range n {
+					nw += lipgloss.Width(s.text)
+				}
+				b.add(line(w, focused && idx == sel, []seg{{sDim, "  "}, {st, string(f.Status)}, {sText, " " + trunc(f.Path, w-nw-6)}}, n), idx)
+				idx++
+			}
+		}
+		section("staged", info.Staged)
+		section("unstaged", info.Unstaged)
+		section("untracked", info.Untracked)
+		if files == 0 {
+			b.add(line(w, false, []seg{{sDim, "  clean"}}, nil), -1)
+		}
+	case 1:
+		for i, c := range info.Log {
+			a := age(c.When)
+			b.add(line(w, focused && i == sel, []seg{{sDim, "  "}, {sPeach, c.Hash}, {sText, " " + trunc(c.Subject, w-len(c.Hash)-len(a)-6)}},
+				[]seg{{sDim, a + " "}}), i)
+		}
+	case 2:
+		for i, wt := range info.Worktrees {
+			mark := seg{sDim, "  "}
+			if wt.Current {
+				mark = seg{sGreen, "● "}
+			}
+			b.add(line(w, focused && i == sel, []seg{{sDim, "  "}, mark, {sBranch, trunc(wt.Branch, w/2)}},
+				[]seg{{sDim, trunc(filepath.Base(wt.Path), w/2-6) + " "}}), i)
 		}
 	}
-	if cur < m.offset {
-		m.offset = cur
-	} else if cur >= m.offset+room {
-		m.offset = cur - room + 1
-	}
-	m.offset = min(max(m.offset, 0), len(lines)-room)
-	return lines[m.offset : m.offset+room], rowIdx[m.offset : m.offset+room]
+	return b
 }
 
 func (m *model) footer(w int) []string {
+	in := func(label string) []string {
+		return []string{line(w, false, []seg{{sAccent, " " + label + " "}, {sText, m.buf}, {sAccent, "█"}}, nil)}
+	}
 	switch m.input {
 	case filterInput:
-		return []string{"", "filter: " + m.buf + "█"}
+		return in("filter")
 	case promptInput:
 		var names []string
 		for _, a := range m.targets() {
 			names = append(names, a.Name)
 		}
-		return []string{trunc("→ "+strings.Join(names, ", "), w), "prompt: " + m.buf + "█"}
+		return []string{line(w, false, []seg{{sDim, trunc(" → "+strings.Join(names, ", "), w)}}, nil), in("prompt")[0]}
 	case spawnNameInput:
-		return []string{"", "new agent name: " + m.buf + "█"}
+		return in("new agent")
 	case spawnDirInput:
-		return []string{"", "in: " + m.buf + "█"}
+		return in("in")
 	}
-	out := []string{styleDim.Render(trunc(m.flash, w))}
-	if m.mode == Popup {
-		return append(out, styleDim.Render(trunc("⏎ jump · p prompt · ␣ mark · n new · / filter · a all · ! next · esc", w)))
+	var hint string
+	switch m.focus {
+	case fSpaces:
+		hint = "↑↓ space  ⏎ agents  tab next  q close"
+	case fAgents:
+		hint = "⏎ type  g go  p prompt  n new  ! next  / find"
+	case fGit:
+		hint = "←→ tab  ↑↓ select  ⏎ open  tab next"
 	}
-	return append(out,
-		styleDim.Render(trunc("⏎ show ⇥ focus g go p prompt n new", w)),
-		styleDim.Render(trunc("/ filter a all v git ! next q close", w)))
-}
-
-func (m *model) gitPanel(w, h int) []string {
-	tabs := []string{"Changes", "Log", "Worktrees"}
-	for i, t := range tabs {
-		if i == m.gitView {
-			tabs[i] = styleHeader.Render(t)
-		} else {
-			tabs[i] = styleDim.Render(t)
-		}
+	out := []string{}
+	if m.flash != "" {
+		out = append(out, line(w, false, []seg{{sSub, " " + trunc(m.flash, w-2)}}, nil))
 	}
-	bar := "─ " + strings.Join(tabs, styleDim.Render(" │ ")) + " "
-	lines := []string{bar + styleDim.Render(strings.Repeat("─", max(w-lipgloss.Width(bar), 0)))}
-
-	r, ok := m.current()
-	dir := r.dir()
-	info, have := m.git[dir]
-	switch {
-	case !ok || dir == "":
-		lines = append(lines, styleDim.Render("select a window or agent"))
-	case !have:
-		lines = append(lines, styleDim.Render("…"))
-	case !info.Repo:
-		lines = append(lines, styleDim.Render(trunc(filepath.Base(dir)+": not a git repo", w)))
-	default:
-		switch m.gitView {
-		case 0:
-			lines = append(lines, changes(info, w)...)
-		case 1:
-			for _, c := range info.Log {
-				when := age(c.When)
-				lines = append(lines, spread(styleMod.Render(c.Hash)+" "+trunc(c.Subject, w-len(c.Hash)-len(when)-2), styleDim.Render(when), w))
-			}
-		case 2:
-			for _, wt := range info.Worktrees {
-				mark := "  "
-				if wt.Current {
-					mark = styleWorking.Render("● ")
-				}
-				lines = append(lines, spread(mark+trunc(wt.Branch, w/2), styleDim.Render(trunc(filepath.Base(wt.Path), w/2-3)), w))
-			}
-		}
-	}
-	if len(lines) > h {
-		lines = lines[:h]
-	}
-	return lines
-}
-
-func changes(info gitinfo.Info, w int) []string {
-	ab := ""
-	if info.Ahead > 0 {
-		ab += styleAdd.Render(fmt.Sprintf("↑%d", info.Ahead))
-	}
-	if info.Behind > 0 {
-		ab += styleDel.Render(fmt.Sprintf("↓%d", info.Behind))
-	}
-	add, del, files := info.Totals()
-	lines := []string{
-		spread(trunc(info.Branch, w-8), ab, w),
-		spread(styleAdd.Render(fmt.Sprintf("+%d", add))+"/"+styleDel.Render(fmt.Sprintf("-%d", del)), fmt.Sprintf("%d files", files), w),
-	}
-	if files == 0 {
-		return append(lines, styleDim.Render("clean"))
-	}
-	section := func(title string, fs []gitinfo.File) {
-		if len(fs) == 0 {
-			return
-		}
-		lines = append(lines, styleShell.Render(fmt.Sprintf("%s (%d)", title, len(fs))))
-		for i, f := range fs {
-			if i == 5 && len(fs) > 6 {
-				lines = append(lines, styleDim.Render(fmt.Sprintf("  +%d more", len(fs)-5)))
-				break
-			}
-			st := string(f.Status)
-			switch f.Status {
-			case 'A':
-				st = styleAdd.Render(st)
-			case 'D':
-				st = styleDel.Render(st)
-			case 'M', 'R':
-				st = styleMod.Render(st)
-			}
-			num := ""
-			if f.Status != '?' {
-				num = styleAdd.Render(fmt.Sprintf("+%d", f.Add)) + "/" + styleDel.Render(fmt.Sprintf("-%d", f.Del))
-			}
-			lines = append(lines, spread(st+" "+trunc(f.Path, w-lipgloss.Width(num)-4), num, w))
-		}
-	}
-	section("Staged", info.Staged)
-	section("Unstaged", info.Unstaged)
-	section("Untracked", info.Untracked)
-	return lines
+	return append(out, line(w, false, []seg{{sDim, " " + trunc(hint, w-2)}}, nil))
 }

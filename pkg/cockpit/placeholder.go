@@ -52,10 +52,10 @@ func (p *placeholder) away() bool {
 }
 
 func (p *placeholder) View() string {
-	msg := styleDim.Render("Select an agent on the left.")
+	msg := sDim.Render("select a space or an agent")
 	if p.away() {
-		msg = styleHeader.Render(p.cp.State.BorrowedName) + " is in the cockpit.\n\n" +
-			styleDim.Render("Enter: bring it back here")
+		msg = sAccent.Bold(true).Render(p.cp.State.BorrowedName) + sSub.Render(" is in the cockpit") + "\n\n" +
+			sDim.Render("⏎ bring it back here")
 	}
 	return lipgloss.Place(p.width, p.height, lipgloss.Center, lipgloss.Center, msg)
 }

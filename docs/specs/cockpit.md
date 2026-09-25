@@ -4,20 +4,21 @@ Status: draft, 2026-09-25
 
 ## Goal
 
-One place to see every Claude Code session across all tmux sessions, know which
-ones need you, and act on them without hunting through ~50 windows.
+One place to see every Claude Code session, know which ones need you, and act
+on them without hunting through ~50 windows.
 
-Two surfaces, same binary:
+A cockpit window (`prefix+g`, toggles), styled after herdr (Catppuccin Mocha):
 
-- **Popup** (`prefix+G`): the current session's tabs and agents; jump, close.
-- **Cockpit window** (`prefix+g`, toggles): tree on the left; selecting an agent
-  or tab swaps its real pane in on the right, so you watch and type into it
-  live. A git panel (changes / log / worktrees) sits under the tree.
+- **spaces**: tmux sessions, each with its most urgent agent state and branch;
+- **agents**: the Claude sessions of the selected space, with tab and age;
+- **git**: changes / log / worktrees of the selection; Enter opens a diff,
+  commit (popup) or the worktree's agent.
 
-Both are scoped to the current tmux session, shown as a herdr-style tree:
-session → tab ("space") → agents; `a` shows every session.
+The right side follows the cursor: the selected agent's real pane (or the
+space's current pane) is swapped in after a short settle delay.
 
-Plus a tmux status segment (`⚠ 2 ● 5`) and desktop notifications.
+Plus a tmux status segment (`⚠ 2 ● 5`). A `prefix+G` popup was tried and
+dropped: the panel does the same job better.
 
 ## Non-goals
 
@@ -32,7 +33,6 @@ Plus a tmux status segment (`⚠ 2 ● 5`) and desktop notifications.
 
 | Command | Purpose |
 |---|---|
-| `claude-status-go popup` | list/filter/jump/prompt, run by `display-popup -E` |
 | `claude-status-go cockpit` | create or focus the cockpit window |
 | `claude-status-go sidebar` | the list pane inside the cockpit window |
 | `claude-status-go count` | status segment for `status-right` |
@@ -40,7 +40,7 @@ Plus a tmux status segment (`⚠ 2 ● 5`) and desktop notifications.
 
 Code layout: `pkg/agents` (discovery + state), `pkg/tmux` (command wrapper behind
 an interface so it can be faked in tests), `pkg/cockpit` (Bubble Tea TUI shared
-by popup and sidebar), `pkg/hook`. `main.go` dispatches on `os.Args[1]`; the
+by the sidebar), `pkg/hook`. `main.go` dispatches on `os.Args[1]`; the
 statusline path imports none of the TUI code.
 
 ## Discovery
@@ -106,11 +106,10 @@ Multi-send shows the recipient list and reports per-target success.
 ## tmux setup (installed by `make install`, opt-in)
 
 Prefix here is `C-a`; `a` is taken (last-window), `g`/`G` are free.
-`display-popup` doesn't expand formats, hence `run-shell` passing the session.
+`run-shell` expands formats, so the binding passes the session and window.
 
 ```tmux
 bind g run-shell 'claude-status-go cockpit "#{session_name}" "#{window_id}"'
-bind G run-shell 'tmux display-popup -c "#{client_name}" -E -w 80% -h 70% "claude-status-go popup \"#{session_name}\""'
 set -ag status-right ' #(claude-status-go count)'
 ```
 
@@ -122,7 +121,7 @@ to `idle` once answered; `procStart` is field 22 of `/proc/<pid>/stat`; the file
 is removed on exit and absent until the folder is trusted. The MVP needs no
 hooks for "needs you".
 
-**1. MVP:** discovery + state from registry, popup (list, filter, jump), count
+**1. MVP:** discovery + state from registry, count
 segment, cockpit window with swap-in and placeholder, guarded prompt to one
 agent, spawn in worktree.
 

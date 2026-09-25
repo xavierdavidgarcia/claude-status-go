@@ -20,7 +20,7 @@ func (f *fakeTmux) Run(args ...string) (string, error) {
 	if args[0] == "list-panes" {
 		var lines []string
 		for _, p := range f.panes {
-			lines = append(lines, p+"\ts\t@1\t1\tw\t0\t/")
+			lines = append(lines, p+"\ts\t@1\t1\tw\t0\t/\t0")
 		}
 		return strings.Join(lines, "\n"), nil
 	}

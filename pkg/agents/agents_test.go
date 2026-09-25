@@ -54,7 +54,7 @@ func TestScan(t *testing.T) {
 		t.Fatalf("want 2 live agents, got %d: %+v", len(got), got)
 	}
 	a, b := got[0], got[1]
-	if a.Name != "infra" || a.State != NeedsYou || a.WaitingFor != "permission prompt" || a.PaneID != "%12" || a.ConfigDir != "/cfgA" {
+	if a.Name != "infra" || a.State != NeedsYou || a.WaitingFor != "permission prompt" || a.PaneID != "%12" || a.TmuxSess != "0" || a.ConfigDir != "/cfgA" {
 		t.Errorf("first agent wrong: %+v", a)
 	}
 	if b.Name != "papyrus" || b.State != Working || b.PaneID != "" {

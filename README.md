@@ -140,27 +140,35 @@ For extra usage, shows daily spend rate and projected monthly total. Only displa
 
 ## Cockpit (tmux)
 
-Your tmux session as a tree of tabs and the Claude agents in them, with what
-needs you (permission prompts), what's working, what's idle.
+A herdr-style side panel for tmux: **spaces** (your tmux sessions) on top,
+the Claude **agents** of the selected space below, and the git state of the
+selection at the bottom. The right side follows the cursor: the selected
+agent's real pane is swapped in, live.
 
 ```tmux
 bind g run-shell '~/.claude/claude-status-go cockpit "#{session_name}" "#{window_id}"'
-bind G run-shell 'tmux display-popup -c "#{client_name}" -E -w 80% -h 70% "~/.claude/claude-status-go popup \"#{session_name}\""'
 set -ag status-right ' #(~/.claude/claude-status-go count)'
 ```
 
-- `prefix g` toggles a `cockpit` window: the tree on the left, and Enter or a
-  click swaps the selected agent's (or tab's) real pane in on the right. `tab`
-  focuses it, `g` goes to its own window, `q` or `prefix g` again returns it and
-  closes the cockpit. The bottom panel shows the selection's git state: changes,
-  log and worktrees (`v` cycles).
-- `prefix G` opens a popup of the current session: Enter jumps there.
-- Both: `a` all sessions, `!` next agent that needs you, `p` prompt (refused
-  while the agent is at a permission prompt or in a shell), `space` mark
-  several, `n` new agent in a git worktree, `/` filter.
+`prefix g` opens the cockpit; again from inside it closes it and puts every
+pane back.
+
+| Key | |
+|---|---|
+| `tab` / `shift+tab` | focus spaces → agents → git |
+| `↑↓` `jk` | move; the right side follows |
+| `⏎` | spaces: go to its agents · agents: type into it · git: open diff / commit / worktree |
+| `←→` | git: changes / log / worktrees |
+| `g` | go to the agent's own window |
+| `p` · `space` | prompt the agent, or the marked ones (refused while one waits on a permission prompt) |
+| `n` | new agent in a git worktree |
+| `!` | next agent that needs you |
+| `/` · `q` | filter · close |
+
+Agents: `!` needs you, spinner working, `✓` idle, `$` in a shell.
 
 Don't `kill-window` the cockpit while an agent is shown in it: tmux kills that
-agent too. Use `q`.
+agent too. Use `q` or `prefix g`.
 
 ## Requirements
 

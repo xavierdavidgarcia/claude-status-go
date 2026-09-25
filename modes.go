@@ -17,10 +17,8 @@ func runCockpitMode(args []string) error {
 		return ""
 	}
 	switch args[0] {
-	case "popup":
-		return cockpit.Run(cockpit.Popup, arg(1))
 	case "sidebar":
-		return cockpit.Run(cockpit.Sidebar, arg(1))
+		return cockpit.Run(arg(1))
 	case "cockpit": // cockpit <session> <client window id>
 		t := tmux.New()
 		session := arg(1)

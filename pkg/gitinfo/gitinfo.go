@@ -169,3 +169,12 @@ func parseLog(out string) []Commit {
 	}
 	return cs
 }
+
+// Branch is the current branch of dir, or "" outside a repo.
+func Branch(dir string) string {
+	out, err := git(dir, "branch", "--show-current")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}

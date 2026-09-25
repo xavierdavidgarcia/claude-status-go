@@ -39,6 +39,7 @@ type Agent struct {
 	WaitingFor string
 	Since      time.Time
 	PaneID     string // "%99"; empty when not running in tmux
+	TmuxSess   string // session the pane was in at startup
 }
 
 func (a Agent) Project() string { return filepath.Base(a.Cwd) }
@@ -184,6 +185,9 @@ func fromRegistry(r registry, dir string) Agent {
 	}
 	if i := strings.LastIndexByte(r.Tmux, '.'); i >= 0 && strings.HasPrefix(r.Tmux[i+1:], "%") {
 		a.PaneID = r.Tmux[i+1:]
+		if j := strings.LastIndex(r.Tmux[:i], ":@"); j >= 0 {
+			a.TmuxSess = r.Tmux[:j]
+		}
 	}
 	switch r.Status {
 	case "waiting":

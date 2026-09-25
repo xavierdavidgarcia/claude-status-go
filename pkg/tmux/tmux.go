@@ -30,6 +30,7 @@ type Pane struct {
 	Index      string // window index
 	Active     bool   // active pane of its window
 	Path       string // pane_current_path
+	WinActive  bool   // its window is the session's current one
 }
 
 func (p Pane) Location() string { return p.Session + ":" + p.Index }
@@ -37,15 +38,16 @@ func (p Pane) Location() string { return p.Session + ":" + p.Index }
 // Panes maps pane id to its current location.
 func (c *Client) Panes() map[string]Pane {
 	out, err := c.R.Run("list-panes", "-a", "-F",
-		"#{pane_id}\t#{session_name}\t#{window_id}\t#{window_index}\t#{window_name}\t#{pane_active}\t#{pane_current_path}")
+		"#{pane_id}\t#{session_name}\t#{window_id}\t#{window_index}\t#{window_name}\t#{pane_active}\t#{pane_current_path}\t#{window_active}")
 	panes := map[string]Pane{}
 	if err != nil {
 		return panes
 	}
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) == 7 {
-			panes[f[0]] = Pane{ID: f[0], Session: f[1], Window: f[2], Index: f[3], WindowName: f[4], Active: f[5] == "1", Path: f[6]}
+		if len(f) == 8 {
+			panes[f[0]] = Pane{ID: f[0], Session: f[1], Window: f[2], Index: f[3], WindowName: f[4],
+				Active: f[5] == "1", Path: f[6], WinActive: f[7] == "1"}
 		}
 	}
 	return panes
@@ -131,5 +133,11 @@ func (c *Client) SelectPane(target string) error {
 
 func (c *Client) KillWindow(target string) error {
 	_, err := c.R.Run("kill-window", "-t", target)
+	return err
+}
+
+// Popup runs cmd in a popup over the attached client, in dir.
+func (c *Client) Popup(dir, cmd string) error {
+	_, err := c.R.Run("display-popup", "-E", "-w", "90%", "-h", "85%", "-d", dir, cmd)
 	return err
 }
