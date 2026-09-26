@@ -47,6 +47,7 @@ type (
 	scanMsg struct {
 		agents []agents.Agent
 		panes  map[string]tmux.Pane
+		subs   map[int][]agents.Sub // by agent pid
 	}
 	gitMsg    gitinfo.Info
 	branchMsg struct{ dir, branch string }
@@ -68,6 +69,7 @@ type model struct {
 
 	agents []agents.Agent
 	panes  map[string]tmux.Pane
+	subs   map[int][]agents.Sub
 	spaces []space
 
 	focus    focus
@@ -119,7 +121,20 @@ func Run(session string) error {
 	return err
 }
 
-func (m *model) scan() scanMsg { return scanMsg{agents: m.scanner.Scan(), panes: m.t.Panes()} }
+func (m *model) scan() scanMsg {
+	as := m.scanner.Scan()
+	subs := map[int][]agents.Sub{}
+	now := time.Now()
+	for _, a := range as {
+		// Only sessions active lately can have live or fresh subagents.
+		if a.State == agents.Working || now.Sub(a.Since) < 15*time.Minute {
+			if ss := m.scanner.Subagents(a, now); len(ss) > 0 {
+				subs[a.PID] = ss
+			}
+		}
+	}
+	return scanMsg{agents: as, panes: m.t.Panes(), subs: subs}
+}
 
 func key(a agents.Agent) string {
 	if a.PaneID != "" {
@@ -130,6 +145,9 @@ func key(a agents.Agent) string {
 
 func (m *model) apply(s scanMsg) {
 	m.agents, m.panes = s.agents, s.panes
+	if s.subs != nil {
+		m.subs = s.subs
+	}
 	m.cp.load()
 	m.spaces = buildSpaces(spaceInput{agents: m.agents, panes: m.panes,
 		borrowed: m.cp.State.Borrowed, slot: m.cp.State.Slot, filter: m.filter})
@@ -296,7 +314,8 @@ func (m *model) mouse(msg tea.MouseMsg) tea.Cmd {
 	switch c.focus {
 	case fSpaces:
 		m.spaceSel = m.spaces[c.index].Name
-		m.apply(scanMsg{m.agents, m.panes})
+		m.apply(scanMsg{agents: m.agents, panes: m.panes})
+		m.enterSpace()
 	case fAgents:
 		sp, _ := m.space()
 		m.agentSel = key(sp.Agents[c.index].Agent)
@@ -315,7 +334,7 @@ func (m *model) move(d int) tea.Cmd {
 				if j := i + d; j >= 0 && j < len(m.spaces) {
 					m.spaceSel = m.spaces[j].Name
 					m.agentSel = ""
-					m.apply(scanMsg{m.agents, m.panes})
+					m.apply(scanMsg{agents: m.agents, panes: m.panes})
 				}
 				break
 			}
@@ -346,7 +365,7 @@ func (m *model) key(k string) (tea.Model, tea.Cmd) {
 	case "esc":
 		if m.filter != "" {
 			m.filter = ""
-			m.apply(scanMsg{m.agents, m.panes})
+			m.apply(scanMsg{agents: m.agents, panes: m.panes})
 			return m, nil
 		}
 		return m, tea.Quit
@@ -379,12 +398,19 @@ func (m *model) key(k string) (tea.Model, tea.Cmd) {
 	case "enter":
 		switch m.focus {
 		case fSpaces:
+			m.enterSpace()
 			m.focus = fAgents
 			return m, m.follow()
 		case fAgents:
 			m.typeInto()
 		case fGit:
 			return m, m.openGitItem()
+		}
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		if i := int(k[0] - '1'); i < len(m.spaces) {
+			m.spaceSel, m.agentSel, m.focus = m.spaces[i].Name, "", fSpaces
+			m.apply(scanMsg{agents: m.agents, panes: m.panes})
+			return m, tea.Batch(m.follow(), m.loadGit())
 		}
 	case "g":
 		if pane := m.previewPane(); pane != "" {
@@ -408,6 +434,17 @@ func (m *model) key(k string) (tea.Model, tea.Cmd) {
 		m.input, m.buf = spawnNameInput, ""
 	}
 	return m, nil
+}
+
+// enterSpace switches the client to the selected space, taking the cockpit along.
+func (m *model) enterSpace() {
+	if m.spaceSel == "" || m.spaceSel == m.session {
+		return
+	}
+	if err := m.cp.MoveTo(m.spaceSel); err != nil {
+		m.flash = "switch: " + err.Error()
+	}
+	m.session = m.cp.Session // moved even if the client couldn't follow
 }
 
 // typeInto puts the keyboard in the shown agent's pane.
@@ -465,7 +502,7 @@ func (m *model) typing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.input == filterInput {
 		m.filter = m.buf
 	}
-	m.apply(scanMsg{m.agents, m.panes})
+	m.apply(scanMsg{agents: m.agents, panes: m.panes})
 	return m, nil
 }
 
@@ -631,7 +668,7 @@ func (m *model) openGitItem() tea.Cmd {
 }
 
 func (m *model) popup(dir, cmd string) {
-	if err := m.t.Popup(dir, cmd); err != nil {
+	if err := m.t.Popup(m.session, dir, cmd); err != nil {
 		m.flash = "popup: " + err.Error()
 	}
 }
@@ -697,18 +734,50 @@ func (b block) fit(room, sel int) block {
 	return block{b.lines[off : off+room], b.idx[off : off+room]}
 }
 
-func (m *model) header(title string, f focus, w int, right []seg) string {
-	st := sDim
+// box wraps a section in a rounded border with the title in the top edge,
+// herdr-style; the border lights up when the section has focus.
+func box(w int, focused bool, title, right []seg, body block, room int) block {
+	bc := lipgloss.NewStyle().Foreground(cSurface1)
+	if focused {
+		bc = lipgloss.NewStyle().Foreground(cMauve)
+	}
+	edge := func(segs []seg) (string, int) {
+		out, n := "", 0
+		for _, sg := range segs {
+			out += sg.style.Render(sg.text)
+			n += lipgloss.Width(sg.text)
+		}
+		return out, n
+	}
+	t, tw := edge(title)
+	r, rw := edge(right)
+	fill := max(w-4-tw-rw, 0)
+	top := bc.Render("╭─") + t + bc.Render(strings.Repeat("─", fill)) + r + bc.Render("─╮")
+	var b block
+	b.add(top, -1)
+	for i, l := range body.lines {
+		b.add(bc.Render("│")+l+bc.Render("│"), body.idx[i])
+	}
+	for range room - len(body.lines) {
+		b.add(bc.Render("│")+blanks(w-2)+bc.Render("│"), -1)
+	}
+	b.add(bc.Render("╰"+strings.Repeat("─", w-2)+"╯"), -1)
+	return b
+}
+
+func (m *model) title(text string, f focus) []seg {
+	st := sSub
 	if m.focus == f {
 		st = sAccent.Bold(true)
 	}
-	return line(w, false, []seg{{st, " " + title}}, right)
+	return []seg{{sDim, " "}, {st, text}, {sDim, " "}}
 }
 
 func (m *model) View() string {
-	w, h := max(m.width, 24), max(m.height, 12)
+	w, h := max(m.width, 24), max(m.height, 16)
+	iw := w - 2 // inside the borders
 
-	// Spaces: two lines each, at most a third of the screen.
+	// Spaces: two lines each.
 	var sb block
 	selSpace := 0
 	for i, sp := range m.spaces {
@@ -717,31 +786,37 @@ func (m *model) View() string {
 			selSpace = i
 		}
 		hl := sel && m.focus == fSpaces
-		bar := seg{sDim, " "}
+		num := seg{sDim, fmt.Sprintf(" %d ", i+1)}
+		if i >= 9 {
+			num = seg{sDim, "   "}
+		}
 		if sel {
-			bar = seg{sAccent, "▎"}
+			num.style = sAccent.Bold(true)
 		}
 		name := sp.Name
 		if name == "" {
 			name = "outside tmux"
 		}
-		right := []seg{}
-		if n := len(sp.Agents); n > 0 {
-			right = []seg{{sDim, fmt.Sprintf("%d ", n)}, dot(sp.State), {sDim, " "}}
-		}
 		nameStyle := sText
 		if sel || sp.Name == m.session {
 			nameStyle = sBold
 		}
-		sb.add(line(w, hl, []seg{bar, {nameStyle, trunc(name, w-8)}}, right), i)
+		var right []seg
+		if sp.Name == m.session {
+			right = append(right, seg{sAccent, "◆ "})
+		}
+		if n := len(sp.Agents); n > 0 {
+			right = append(right, seg{sDim, fmt.Sprintf("%d ", n)}, dot(sp.State), seg{sDim, " "})
+		}
+		sb.add(line(iw, hl, []seg{num, {nameStyle, trunc(name, iw-10)}}, right), i)
 		sub := m.branches[sp.Path].name
 		if sub == "" && sp.Path != "" {
 			sub = filepath.Base(sp.Path)
 		}
-		sb.add(line(w, hl, []seg{{sDim, "  "}, {sBranch, trunc(sub, w-4)}}, nil), i)
+		sb.add(line(iw, hl, []seg{{sDim, "   "}, {sBranch, trunc(sub, iw-4)}}, nil), i)
 	}
 
-	// Agents of the selected space.
+	// Agents of the selected space, with their subagents.
 	sp, _ := m.space()
 	var ab block
 	selAgent := -1
@@ -751,63 +826,60 @@ func (m *model) View() string {
 			selAgent = i
 		}
 		hl := sel && m.focus == fAgents
-		bar := seg{sDim, " "}
-		if sel {
-			bar = seg{sAccent, "▎"}
-		}
-		mark := " "
+		mark := seg{sDim, " "}
 		if m.marked[key(it.Agent)] {
-			mark = "✓"
+			mark = seg{sAccent, "✓"}
 		}
 		nameStyle := sBold
 		if it.PaneID != "" && it.PaneID == m.cp.State.Borrowed {
 			nameStyle = sAccent.Bold(true) // the one on screen
 		}
 		word := stateWord(it.State)
-		ab.add(line(w, hl, []seg{bar, stateGlyph(it.State, m.frame), {sDim, mark}, {nameStyle, trunc(it.Name, w-lipgloss.Width(word.text)-6)}},
+		ab.add(line(iw, hl, []seg{{sDim, " "}, stateGlyph(it.State, m.frame), mark, {nameStyle, trunc(it.Name, iw-lipgloss.Width(word.text)-6)}},
 			[]seg{word, {sDim, " "}}), i)
-		sub := []seg{{sDim, "    "}, {sSub, trunc(it.Tab, w/2)}}
+		sub := []seg{{sDim, "   "}, {sSub, trunc(it.Tab, iw/2)}}
 		if a := age(it.Since); a != "" {
 			sub = append(sub, seg{sDim, " · " + a})
 		}
 		if it.State == agents.NeedsYou && it.WaitingFor != "" {
-			sub = []seg{{sDim, "    "}, {sRed, trunc(it.WaitingFor, w-5)}}
+			sub = []seg{{sDim, "   "}, {sRed, trunc(it.WaitingFor, iw-4)}}
 		}
-		ab.add(line(w, hl, sub, nil), i)
+		ab.add(line(iw, hl, sub, nil), i)
+		subs := m.subs[it.PID]
+		for j, sa := range subs {
+			branch := "├ "
+			if j == len(subs)-1 {
+				branch = "└ "
+			}
+			g := seg{sGreen, "✓"}
+			if sa.Running {
+				g = seg{sYellow, spinner[(m.frame+j)%len(spinner)]}
+			}
+			desc := sa.Desc
+			if desc == "" {
+				desc = sa.Type
+			}
+			a := age(sa.When)
+			ab.add(line(iw, hl, []seg{{sDim, "   " + branch}, g, {sSub, " " + trunc(desc, iw-len(a)-9)}}, []seg{{sDim, a + " "}}), i)
+		}
 	}
 	if len(sp.Agents) == 0 {
-		ab.add(line(w, false, []seg{{sDim, "  no agents here · n to start one"}}, nil), -1)
+		ab.add(line(iw, false, []seg{{sDim, " no agents here · n to start one"}}, nil), -1)
 	}
-
-	// Git panel of the selection.
-	gitRoom := 0
-	if h >= 26 {
-		gitRoom = h * 35 / 100
-	}
-	gb := m.gitBlock(w)
 
 	foot := m.footer(w)
-	spaceRoom := min(len(sb.lines), max(4, h/3))
-	agentRoom := h - 1 - spaceRoom - 2 - len(foot)
-	if gitRoom > 0 {
+	spaceRoom := min(len(sb.lines), max(4, h/4))
+	gitRoom := h*30/100 - 2
+	small := h < 30 // no room for all three: git replaces agents while focused
+	if small {
+		gitRoom = h - (spaceRoom + 2) - len(foot) - 2
+	}
+	agentRoom := h - (spaceRoom + 2) - len(foot) - 2
+	if !small {
 		agentRoom -= gitRoom + 2
 	}
 	agentRoom = max(agentRoom, 2)
-
-	var out []string
-	m.clicks = m.clicks[:0]
-	emit := func(s string, f focus, i int) {
-		out = append(out, s)
-		m.clicks = append(m.clicks, click{f, i})
-	}
-	emitBlock := func(b block, f focus, room int) {
-		for i, l := range b.lines {
-			emit(l, f, b.idx[i])
-		}
-		for range room - len(b.lines) {
-			emit("", f, -1)
-		}
-	}
+	showAgents, showGit := !small || m.focus != fGit, !small || m.focus == fGit
 
 	c := map[agents.State]int{}
 	for _, s := range m.spaces {
@@ -815,40 +887,54 @@ func (m *model) View() string {
 			c[it.State]++
 		}
 	}
-	summary := []seg{}
+	var sum []seg
 	if c[agents.NeedsYou] > 0 {
-		summary = append(summary, seg{sRed, fmt.Sprintf("! %d  ", c[agents.NeedsYou])})
+		sum = append(sum, seg{sRed, fmt.Sprintf(" ! %d", c[agents.NeedsYou])})
 	}
-	summary = append(summary, seg{sYellow, fmt.Sprintf("● %d ", c[agents.Working])})
-	emit(m.header("spaces", fSpaces, w, summary), fSpaces, -1)
-	emitBlock(sb.fit(spaceRoom, selSpace), fSpaces, spaceRoom)
-	emit("", fAgents, -1)
-	emit(m.header("agents", fAgents, w, nil), fAgents, -1)
-	emitBlock(ab.fit(agentRoom, selAgent), fAgents, agentRoom)
-	if gitRoom > 0 {
-		emit("", fGit, -1)
-		emit(m.gitHeader(w), fGit, -1)
-		emitBlock(gb.fit(gitRoom, m.gitSel[m.gitTab]), fGit, gitRoom)
+	sum = append(sum, seg{sYellow, fmt.Sprintf(" ● %d ", c[agents.Working])})
+
+	name := sp.Name
+	if name == "" {
+		name = "outside tmux"
+	}
+	var out []string
+	m.clicks = m.clicks[:0]
+	emit := func(b block, f focus) {
+		for i, l := range b.lines {
+			out = append(out, l)
+			m.clicks = append(m.clicks, click{f, b.idx[i]})
+		}
+	}
+	emit(box(w, m.focus == fSpaces, m.title("spaces", fSpaces), sum, sb.fit(spaceRoom, selSpace), spaceRoom), fSpaces)
+	if showAgents {
+		emit(box(w, m.focus == fAgents, m.title("agents", fAgents), []seg{{sDim, " " + trunc(name, w/3) + " "}}, ab.fit(agentRoom, selAgent), agentRoom), fAgents)
+	}
+	if showGit {
+		emit(box(w, m.focus == fGit, m.gitTitle(), nil, m.gitBlock(iw).fit(gitRoom, m.gitSel[m.gitTab]), gitRoom), fGit)
 	}
 	for _, l := range foot {
-		emit(l, fGit, -1)
+		out = append(out, l)
+		m.clicks = append(m.clicks, click{fGit, -1})
 	}
 	return strings.Join(out, "\n")
 }
 
-func (m *model) gitHeader(w int) string {
-	var left []seg
+func (m *model) gitTitle() []seg {
+	out := []seg{{sDim, " "}}
 	for i, t := range gitTabs {
 		st := sDim
 		if i == m.gitTab {
-			st = sDim.Bold(true)
+			st = sSub.Bold(true)
 			if m.focus == fGit {
 				st = sAccent.Bold(true)
 			}
 		}
-		left = append(left, seg{sDim, " "}, seg{st, t})
+		if i > 0 {
+			out = append(out, seg{sDim, " · "})
+		}
+		out = append(out, seg{st, t})
 	}
-	return line(w, false, left, nil)
+	return append(out, seg{sDim, " "})
 }
 
 func (m *model) gitBlock(w int) block {

@@ -40,20 +40,24 @@ func buildSpaces(in spaceInput) []space {
 		}
 		return byName[name]
 	}
+	// The slot stands in for the pane it lent to the cockpit.
+	lent := func(p tmux.Pane) tmux.Pane {
+		if b, ok := in.panes[in.borrowed]; ok && p.ID == in.slot {
+			return tmux.Pane{ID: b.ID, Path: b.Path}
+		}
+		return p
+	}
 	for _, p := range in.panes {
 		sp := get(p.Session)
 		if p.WinActive && p.Active && p.WindowName != WindowName {
-			sp.ActivePane, sp.Path = p.ID, p.Path
-			// The slot stands in for the pane it lent to the cockpit.
-			if b, ok := in.panes[in.borrowed]; ok && p.ID == in.slot {
-				sp.ActivePane, sp.Path = b.ID, b.Path
-			}
+			q := lent(p)
+			sp.ActivePane, sp.Path = q.ID, q.Path
 		}
 	}
 	// A session looking at its cockpit still gets a folder for its branch line.
 	for _, p := range in.panes {
 		if sp := byName[p.Session]; sp.Path == "" && p.Active && p.WindowName != WindowName {
-			sp.Path = p.Path
+			sp.Path = lent(p).Path
 		}
 	}
 

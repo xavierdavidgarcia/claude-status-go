@@ -157,7 +157,8 @@ pane back.
 |---|---|
 | `tab` / `shift+tab` | focus spaces → agents → git |
 | `↑↓` `jk` | move; the right side follows |
-| `⏎` | spaces: go to its agents · agents: type into it · git: open diff / commit / worktree |
+| `1`–`9` | preview space n |
+| `⏎` / click | spaces: switch your client to it, cockpit included · agents: type into it · git: open diff / commit / worktree |
 | `←→` | git: changes / log / worktrees |
 | `g` | go to the agent's own window |
 | `p` · `space` | prompt the agent, or the marked ones (refused while one waits on a permission prompt) |
@@ -165,7 +166,9 @@ pane back.
 | `!` | next agent that needs you |
 | `/` · `q` | filter · close |
 
-Agents: `!` needs you, spinner working, `✓` idle, `$` in a shell.
+Agents: `!` needs you, spinner working, `✓` idle, `$` in a shell. Claude's
+own subagents (Agent/Task tool) are nested under their session while running
+and for 15 minutes after, read from its `subagents/` transcripts.
 
 Don't `kill-window` the cockpit while an agent is shown in it: tmux kills that
 agent too. Use `q` or `prefix g`.

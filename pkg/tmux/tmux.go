@@ -136,8 +136,38 @@ func (c *Client) KillWindow(target string) error {
 	return err
 }
 
-// Popup runs cmd in a popup over the attached client, in dir.
-func (c *Client) Popup(dir, cmd string) error {
-	_, err := c.R.Run("display-popup", "-E", "-w", "90%", "-h", "85%", "-d", dir, cmd)
+// Popup runs cmd in dir, in a popup over the client viewing session.
+func (c *Client) Popup(session, dir, cmd string) error {
+	args := []string{"display-popup", "-E", "-w", "90%", "-h", "85%", "-d", dir}
+	if out, err := c.R.Run("list-clients", "-F", "#{client_name}\t#{client_session}"); err == nil {
+		for _, l := range strings.Split(out, "\n") {
+			if name, s, ok := strings.Cut(l, "\t"); ok && s == session {
+				args = append(args, "-c", name)
+				break
+			}
+		}
+	}
+	_, err := c.R.Run(append(args, cmd)...)
+	return err
+}
+
+// Set sets an option; scope is "-w" (window) or "-p" (pane).
+func (c *Client) Set(scope, target, name, value string) error {
+	_, err := c.R.Run("set-option", scope, "-t", target, name, value)
+	return err
+}
+
+// MoveWindow moves a window to the end of another session.
+func (c *Client) MoveWindow(window, session string) error {
+	_, err := c.R.Run("move-window", "-d", "-s", window, "-t", session+":")
+	return err
+}
+
+// SwitchTo shows target (a window or pane) on the attached client.
+func (c *Client) SwitchTo(target string) error {
+	if _, err := c.R.Run("switch-client", "-t", target); err != nil {
+		return err
+	}
+	_, err := c.R.Run("select-window", "-t", target)
 	return err
 }

@@ -9,6 +9,7 @@ import (
 // Catppuccin Mocha, the palette herdr ships by default.
 var (
 	cSurface0 = lipgloss.Color("#313244")
+	cSurface1 = lipgloss.Color("#45475a")
 	cOverlay0 = lipgloss.Color("#6c7086")
 	cSubtext0 = lipgloss.Color("#a6adc8")
 	cText     = lipgloss.Color("#cdd6f4")

@@ -113,8 +113,51 @@ func (c *Cockpit) Toggle(currentWindow string) error {
 	if err != nil {
 		return err
 	}
+	c.style(slot)
 	c.State = State{Slot: slot, Sidebar: sidebar}
 	return c.save()
+}
+
+// style gives the cockpit window herdr-like borders and a title bar over the
+// shown pane, set by Show through the pane's @cockpit_title.
+func (c *Cockpit) style(target string) {
+	for _, o := range [][2]string{
+		{"pane-border-status", "top"},
+		{"pane-border-lines", "single"},
+		{"pane-border-style", "fg=#45475a"},
+		{"pane-active-border-style", "fg=#cba6f7"},
+		{"pane-border-format", "#{?@cockpit_title,#[fg=#cba6f7#,bold] #{@cockpit_title} #[default],}"},
+	} {
+		c.T.Set("-w", target, o[0], o[1])
+	}
+}
+
+// MoveTo carries the cockpit into another session and switches the client
+// there, replacing that session's own cockpit if it had one.
+func (c *Cockpit) MoveTo(session string) error {
+	c.load()
+	if session == c.Session {
+		return nil
+	}
+	win := c.T.Panes()[c.State.Sidebar].Window
+	if win == "" {
+		return fmt.Errorf("cockpit window not found")
+	}
+	if c.T.FindWindow(session, WindowName) != "" {
+		New(c.T, session).Close()
+	}
+	if err := c.T.MoveWindow(win, session); err != nil {
+		return err
+	}
+	old := c.Path
+	*c = *New(c.T, session)
+	c.load()
+	if data, err := os.ReadFile(old); err == nil {
+		os.WriteFile(c.Path, data, 0o600)
+		os.Remove(old)
+		c.load()
+	}
+	return c.T.SwitchTo(win)
 }
 
 // Show swaps an agent's pane into the cockpit slot, returning any other
@@ -130,6 +173,7 @@ func (c *Cockpit) Show(pane, name string) error {
 	if err := c.T.Swap(pane, c.State.Slot); err != nil {
 		return err
 	}
+	c.T.Set("-p", pane, "@cockpit_title", name)
 	c.State.Borrowed, c.State.BorrowedName = pane, name
 	return c.save()
 }
