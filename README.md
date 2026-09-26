@@ -141,34 +141,39 @@ For extra usage, shows daily spend rate and projected monthly total. Only displa
 ## Cockpit (tmux)
 
 A herdr-style side panel for tmux: **spaces** (your tmux sessions) on top,
-the Claude **agents** of the selected space below, and the git state of the
-selection at the bottom. The right side follows the cursor: the selected
-agent's real pane is swapped in, live.
+the Claude **agents** of the selected space with their subagents below, and
+the git state of the selection at the bottom. The right side follows the
+cursor: an agent's real pane is swapped in live; a subagent shows its
+transcript as it runs.
 
 ```tmux
-bind g run-shell '~/.claude/claude-status-go cockpit "#{session_name}" "#{window_id}"'
+bind g run-shell '~/.claude/claude-status-go cockpit "#{session_name}" "#{window_id}" "#{pane_id}"'
 set -ag status-right ' #(~/.claude/claude-status-go count)'
 ```
 
-`prefix g` opens the cockpit; again from inside it closes it and puts every
+`prefix g` opens the cockpit. From an agent you're typing into it brings the
+keyboard back to the list; from the list it closes the cockpit and puts every
 pane back.
 
 | Key | |
 |---|---|
-| `tab` / `shift+tab` | focus spaces → agents → git |
-| `↑↓` `jk` | move; the right side follows |
-| `1`–`9` | preview space n |
-| `⏎` / click | spaces: switch your client to it, cockpit included · agents: type into it · git: open diff / commit / worktree |
-| `←→` | git: changes / log / worktrees |
+| `↑↓` `jk` | move through spaces, agents and git as one list; the right side follows |
+| `tab` / `shift+tab` | jump to the next / previous section |
+| `⏎` / click | space: switch your client to it, cockpit included · agent: show it · `+ N more`: unfold subagents · git: open diff / commit / worktree |
+| `→` `i` | type into the agent (`prefix g` to come back) |
+| `←→` | git: changes / log / worktrees (or click the tab name) |
+| `1`–`9` · `r` | preview space n · rename the space (tmux session) |
 | `g` | go to the agent's own window |
 | `p` · `space` | prompt the agent, or the marked ones (refused while one waits on a permission prompt) |
-| `n` | new agent in a git worktree |
-| `!` | next agent that needs you |
-| `/` · `q` | filter · close |
+| `n` · `!` · `/` · `q` | new agent in a git worktree · next agent that needs you · filter · close |
 
-Agents: `!` needs you, spinner working, `✓` idle, `$` in a shell. Claude's
-own subagents (Agent/Task tool) are nested under their session while running
-and for 15 minutes after, read from its `subagents/` transcripts.
+Agents: `!` needs you, spinner working, `✓` idle, `$` in a shell. Subagents
+(Agent/Task tool): spinner running, `✓` done, `✗` stopped; running ones and
+the latest three are listed, older ones fold under `+ N more`. They're read
+from Claude's own `subagents/` transcripts, no hook needed.
+
+Spaces named only by tmux's number show their first tabs (`0 · Unifi,
+Ephemer`); `r` gives them a real name.
 
 Don't `kill-window` the cockpit while an agent is shown in it: tmux kills that
 agent too. Use `q` or `prefix g`.

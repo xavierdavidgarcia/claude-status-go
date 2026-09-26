@@ -79,3 +79,15 @@ func TestSortByStateThenAge(t *testing.T) {
 }
 
 func at(sec int64) time.Time { return time.Unix(sec, 0) }
+
+func TestDescends(t *testing.T) {
+	fs := fakeFS{
+		"/proc/300/stat": "300 (claude) S 200 x",
+		"/proc/200/stat": "200 (zsh) S 100 x",
+		"/proc/100/stat": "100 (tmux: server) S 1 x",
+	}
+	s := &Scanner{FS: fs, Proc: "/proc"}
+	if !s.Descends(300, 200) || !s.Descends(300, 300) || s.Descends(300, 999) || s.Descends(200, 300) {
+		t.Fatal("wrong ancestry")
+	}
+}

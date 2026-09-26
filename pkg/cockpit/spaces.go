@@ -16,6 +16,20 @@ type space struct {
 	State      agents.State // most urgent agent; Unknown when none
 	ActivePane string       // current pane of the session, unless it's the cockpit
 	Path       string
+	Tabs       []string // window names by index, cockpit excluded
+}
+
+// Label names a space: the session name, plus its first tabs when the name
+// is only tmux's default number.
+func (sp space) Label() string {
+	if sp.Name == "" {
+		return "outside tmux"
+	}
+	if _, err := strconv.Atoi(sp.Name); err != nil || len(sp.Tabs) == 0 {
+		return sp.Name
+	}
+	n := min(len(sp.Tabs), 2)
+	return sp.Name + " · " + strings.Join(sp.Tabs[:n], ", ")
 }
 
 type item struct {
@@ -30,6 +44,9 @@ type spaceInput struct {
 	borrowed string // pane shown in the cockpit; listed under its home tab
 	slot     string // sits in the borrowed pane's home tab meanwhile
 	filter   string
+	// owns reports whether an agent's process runs in a pane; nil trusts the
+	// recorded session.
+	owns func(a agents.Agent, p tmux.Pane) bool
 }
 
 func buildSpaces(in spaceInput) []space {
@@ -54,6 +71,30 @@ func buildSpaces(in spaceInput) []space {
 			sp.ActivePane, sp.Path = q.ID, q.Path
 		}
 	}
+	tabs := map[string]map[string]tmux.Pane{} // session → window id → a pane of it
+	for _, p := range in.panes {
+		if p.WindowName == WindowName {
+			continue
+		}
+		if tabs[p.Session] == nil {
+			tabs[p.Session] = map[string]tmux.Pane{}
+		}
+		tabs[p.Session][p.Window] = p
+	}
+	for name, ws := range tabs {
+		var ps []tmux.Pane
+		for _, p := range ws {
+			ps = append(ps, p)
+		}
+		sort.Slice(ps, func(i, j int) bool {
+			a, _ := strconv.Atoi(ps[i].Index)
+			b, _ := strconv.Atoi(ps[j].Index)
+			return a < b
+		})
+		for _, p := range ps {
+			get(name).Tabs = append(get(name).Tabs, p.WindowName)
+		}
+	}
 	// A session looking at its cockpit still gets a folder for its branch line.
 	for _, p := range in.panes {
 		if sp := byName[p.Session]; sp.Path == "" && p.Active && p.WindowName != WindowName {
@@ -72,9 +113,14 @@ func buildSpaces(in spaceInput) []space {
 		it := item{Agent: a}
 		sp := get("")
 		p, ok := in.panes[home]
-		// Pane ids are per tmux server: trust one only in the session the agent
-		// recorded (for a borrowed pane, where its slot now stands in).
-		if ok && (a.TmuxSess == "" || a.TmuxSess == p.Session) {
+		// Pane ids are per tmux server: trust one only where the agent really
+		// runs (for a borrowed pane, where its slot now stands in).
+		if ok && in.owns != nil {
+			ok = in.owns(a, in.panes[a.PaneID])
+		} else if ok {
+			ok = a.TmuxSess == "" || a.TmuxSess == p.Session
+		}
+		if ok {
 			sp = get(p.Session)
 			it.Tab = p.Index + " " + p.WindowName
 			it.index, _ = strconv.Atoi(p.Index)

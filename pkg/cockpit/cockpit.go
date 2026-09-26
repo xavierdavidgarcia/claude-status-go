@@ -21,6 +21,7 @@ type State struct {
 	Sidebar      string `json:"sidebar"`
 	Borrowed     string `json:"borrowed,omitempty"`
 	BorrowedName string `json:"borrowed_name,omitempty"`
+	Viewing      string `json:"viewing,omitempty"` // transcript shown in the slot
 }
 
 type Cockpit struct {
@@ -77,20 +78,30 @@ func (c *Cockpit) save() error {
 const sidebarWidth = "42"
 
 // cmd is the shell command running this binary in mode for this session.
-func (c *Cockpit) cmd(mode string) string {
+func (c *Cockpit) cmd(mode string) string { return command(mode, c.Session) }
+
+func command(mode string, args ...string) string {
 	exe, err := os.Executable()
 	if err != nil {
 		exe = "claude-status-go"
 	}
-	return shellQuote(exe) + " " + mode + " " + shellQuote(c.Session)
+	out := shellQuote(exe) + " " + mode
+	for _, a := range args {
+		out += " " + shellQuote(a)
+	}
+	return out
 }
 
-// Toggle opens the session's cockpit window, or closes it when the client is
-// already looking at it (currentWindow is the client's window id).
-func (c *Cockpit) Toggle(currentWindow string) error {
+// Toggle opens the session's cockpit window. From inside it, it returns the
+// keyboard to the list, or closes the cockpit when the list already has it.
+func (c *Cockpit) Toggle(currentWindow, currentPane string) error {
 	session := c.Session
 	if id := c.T.FindWindow(session, WindowName); id != "" {
 		if id == currentWindow {
+			c.load()
+			if currentPane != "" && currentPane != c.State.Sidebar {
+				return c.T.SelectPane(c.State.Sidebar)
+			}
 			return c.Close()
 		}
 		c.load()
@@ -170,12 +181,52 @@ func (c *Cockpit) Show(pane, name string) error {
 	if err := c.Restore(); err != nil {
 		return err
 	}
+	c.stopViewing()
 	if err := c.T.Swap(pane, c.State.Slot); err != nil {
 		return err
 	}
 	c.T.Set("-p", pane, "@cockpit_title", name)
 	c.State.Borrowed, c.State.BorrowedName = pane, name
 	return c.save()
+}
+
+// View shows a subagent transcript in the slot instead of a borrowed pane.
+func (c *Cockpit) View(path, title string) error {
+	c.load()
+	if c.State.Viewing == path && c.State.Borrowed == "" {
+		return nil
+	}
+	if err := c.Restore(); err != nil {
+		return err
+	}
+	if err := c.T.Respawn(c.State.Slot, command("transcript", path, title)); err != nil {
+		return err
+	}
+	c.T.Set("-p", c.State.Slot, "@cockpit_title", title)
+	c.State.Viewing = path
+	return c.save()
+}
+
+// stopViewing puts the placeholder back in the slot before it's lent out.
+func (c *Cockpit) stopViewing() {
+	if c.State.Viewing == "" {
+		return
+	}
+	c.T.Respawn(c.State.Slot, c.cmd("placeholder"))
+	c.T.Set("-p", c.State.Slot, "@cockpit_title", "")
+	c.State.Viewing = ""
+	c.save()
+}
+
+// Renamed follows a rename of the cockpit's session.
+func (c *Cockpit) Renamed(name string) {
+	old := c.Path
+	c.load()
+	st := c.State
+	*c = *New(c.T, name)
+	c.State = st
+	c.save()
+	os.Remove(old)
 }
 
 // Close returns any borrowed pane and removes the cockpit window.

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/xgarcia/claude-status-go/pkg/agents"
 	"github.com/xgarcia/claude-status-go/pkg/gitinfo"
@@ -33,12 +32,13 @@ const (
 	promptInput
 	spawnNameInput
 	spawnDirInput
+	renameInput
 )
 
 const (
 	gitTTL    = 5 * time.Second
-	branchTTL = 15 * time.Second
 	showDelay = 120 * time.Millisecond // let the cursor settle before swapping panes
+	subsShown = 3                      // finished subagents listed before "+ N more"
 )
 
 var gitTabs = []string{"changes", "log", "worktrees"}
@@ -49,16 +49,33 @@ type (
 		panes  map[string]tmux.Pane
 		subs   map[int][]agents.Sub // by agent pid
 	}
-	gitMsg    gitinfo.Info
-	branchMsg struct{ dir, branch string }
-	showMsg   struct{ pane string }
-	tickMsg   struct{}
-	spinMsg   struct{}
+	gitMsg  gitinfo.Info
+	showMsg struct{ target target }
+	tickMsg struct{}
+	spinMsg struct{}
 )
 
-type branch struct {
-	name string
-	at   time.Time
+// target is what the right side shows: a pane, or a subagent's transcript.
+type target struct {
+	pane, path, name string
+}
+
+// arow is a line of the agents list: an agent, one of its subagents, or the
+// "+ N more" row folding older subagents.
+type arow struct {
+	agent item
+	sub   *agents.Sub
+	more  int
+}
+
+func (r arow) key() string {
+	switch {
+	case r.sub != nil:
+		return "sub:" + r.sub.Path
+	case r.more > 0:
+		return "more:" + key(r.agent.Agent)
+	}
+	return key(r.agent.Agent)
 }
 
 type model struct {
@@ -74,7 +91,8 @@ type model struct {
 
 	focus    focus
 	spaceSel string // space name
-	agentSel string // agent key
+	rowSel   string // arow key
+	expanded map[string]bool
 	gitTab   int
 	gitSel   [3]int
 	marked   map[string]bool
@@ -87,11 +105,13 @@ type model struct {
 
 	git      map[string]gitinfo.Info
 	loading  map[string]bool
-	branches map[string]branch
+	ownCache map[[2]int]bool
 
 	width, height int
 	frame         int
-	clicks        []click // what each screen line selects
+	clicks        []click  // what each screen line selects
+	gitTabsAt     [][2]int // x ranges of the git tab titles
+	gitTitleY     int
 }
 
 type click struct {
@@ -108,8 +128,8 @@ func Run(session string) error {
 		}
 	}
 	m := &model{session: session, scanner: agents.NewScanner(), t: t, cp: New(t, session),
-		spaceSel: session, focus: fAgents, marked: map[string]bool{},
-		git: map[string]gitinfo.Info{}, loading: map[string]bool{}, branches: map[string]branch{}}
+		spaceSel: session, focus: fAgents, marked: map[string]bool{}, expanded: map[string]bool{},
+		git: map[string]gitinfo.Info{}, loading: map[string]bool{}, ownCache: map[[2]int]bool{}, gitTitleY: -1}
 	m.apply(m.scan())
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	// kill-pane sends SIGHUP; quit cleanly so the borrowed agent goes home.
@@ -126,11 +146,8 @@ func (m *model) scan() scanMsg {
 	subs := map[int][]agents.Sub{}
 	now := time.Now()
 	for _, a := range as {
-		// Only sessions active lately can have live or fresh subagents.
-		if a.State == agents.Working || now.Sub(a.Since) < 15*time.Minute {
-			if ss := m.scanner.Subagents(a, now); len(ss) > 0 {
-				subs[a.PID] = ss
-			}
+		if ss := m.scanner.Subagents(a, now); len(ss) > 0 {
+			subs[a.PID] = ss
 		}
 	}
 	return scanMsg{agents: as, panes: m.t.Panes(), subs: subs}
@@ -143,6 +160,8 @@ func key(a agents.Agent) string {
 	return fmt.Sprintf("pid:%d", a.PID)
 }
 
+func (m *model) refresh() { m.apply(scanMsg{agents: m.agents, panes: m.panes}) }
+
 func (m *model) apply(s scanMsg) {
 	m.agents, m.panes = s.agents, s.panes
 	if s.subs != nil {
@@ -150,20 +169,34 @@ func (m *model) apply(s scanMsg) {
 	}
 	m.cp.load()
 	m.spaces = buildSpaces(spaceInput{agents: m.agents, panes: m.panes,
-		borrowed: m.cp.State.Borrowed, slot: m.cp.State.Slot, filter: m.filter})
+		borrowed: m.cp.State.Borrowed, slot: m.cp.State.Slot, filter: m.filter, owns: m.owns})
 	if _, ok := m.space(); !ok && len(m.spaces) > 0 {
 		m.spaceSel = m.spaces[0].Name
 	}
-	sp, _ := m.space()
-	for _, it := range sp.Agents {
-		if key(it.Agent) == m.agentSel {
+	rows := m.rows()
+	for _, r := range rows {
+		if r.key() == m.rowSel {
 			return
 		}
 	}
-	m.agentSel = ""
-	if len(sp.Agents) > 0 {
-		m.agentSel = key(sp.Agents[0].Agent)
+	m.rowSel = ""
+	if len(rows) > 0 {
+		m.rowSel = rows[0].key()
 	}
+}
+
+// owns ties an agent to a pane by process ancestry, cached per pair.
+func (m *model) owns(a agents.Agent, p tmux.Pane) bool {
+	if p.PID == 0 {
+		return false
+	}
+	k := [2]int{a.PID, p.PID}
+	v, ok := m.ownCache[k]
+	if !ok {
+		v = m.scanner.Descends(a.PID, p.PID)
+		m.ownCache[k] = v
+	}
+	return v
 }
 
 func (m *model) space() (space, bool) {
@@ -175,14 +208,40 @@ func (m *model) space() (space, bool) {
 	return space{}, false
 }
 
-func (m *model) agent() (item, bool) {
+// rows lists the selected space's agents, each followed by its running
+// subagents and the latest finished ones.
+func (m *model) rows() []arow {
 	sp, _ := m.space()
+	var out []arow
 	for _, it := range sp.Agents {
-		if key(it.Agent) == m.agentSel {
-			return it, true
+		out = append(out, arow{agent: it})
+		subs := m.subs[it.PID]
+		shown := 0
+		for i := range subs {
+			if subs[i].State == agents.SubRunning || shown < subsShown || m.expanded[key(it.Agent)] {
+				out = append(out, arow{agent: it, sub: &subs[i]})
+				shown++
+			}
+		}
+		if hidden := len(subs) - shown; hidden > 0 {
+			out = append(out, arow{agent: it, more: hidden})
 		}
 	}
-	return item{}, false
+	return out
+}
+
+func (m *model) row() (arow, int, bool) {
+	for i, r := range m.rows() {
+		if r.key() == m.rowSel {
+			return r, i, true
+		}
+	}
+	return arow{}, -1, false
+}
+
+func (m *model) agent() (item, bool) {
+	r, _, ok := m.row()
+	return r.agent, ok
 }
 
 // dir is what the git panel describes: the agent's repo, else the space's.
@@ -194,7 +253,7 @@ func (m *model) dir() string {
 	return sp.Path
 }
 
-// ── commands (background work) ──────────────────────────
+// ── background work ─────────────────────────────────────
 
 func tick() tea.Cmd { return tea.Tick(time.Second, func(time.Time) tea.Msg { return tickMsg{} }) }
 
@@ -211,57 +270,62 @@ func (m *model) loadGit() tea.Cmd {
 	return func() tea.Msg { return gitMsg(gitinfo.Load(dir)) }
 }
 
-func (m *model) loadBranches() tea.Cmd {
-	var cmds []tea.Cmd
-	for _, sp := range m.spaces {
-		dir := sp.Path
-		if dir == "" || time.Since(m.branches[dir].at) < branchTTL {
-			continue
-		}
-		m.branches[dir] = branch{name: m.branches[dir].name, at: time.Now()}
-		cmds = append(cmds, func() tea.Msg { return branchMsg{dir, gitinfo.Branch(dir)} })
-	}
-	return tea.Batch(cmds...)
-}
-
-// follow schedules showing the selection once the cursor has settled.
-func (m *model) follow() tea.Cmd {
-	pane := m.previewPane()
-	if pane == "" || pane == m.cp.State.Borrowed {
-		return nil
-	}
-	return tea.Tick(showDelay, func(time.Time) tea.Msg { return showMsg{pane} })
-}
-
-func (m *model) previewPane() string {
+// selected is what the right side should show for the cursor.
+func (m *model) selected() target {
 	if m.focus == fSpaces {
 		sp, _ := m.space()
-		p, _ := sp.preview()
-		return p
+		p, n := sp.preview()
+		return target{pane: p, name: n}
 	}
-	if it, ok := m.agent(); ok {
-		return it.PaneID
+	r, _, ok := m.row()
+	switch {
+	case !ok:
+		return target{}
+	case r.sub != nil:
+		return target{path: r.sub.Path, name: r.agent.Name + " › " + subName(*r.sub)}
 	}
-	return ""
+	return target{pane: r.agent.PaneID, name: r.agent.Name}
 }
 
-func (m *model) nameOf(pane string) string {
-	for _, a := range m.agents {
-		if a.PaneID == pane {
-			return a.Name
-		}
+func subName(s agents.Sub) string {
+	if s.Desc != "" {
+		return s.Desc
 	}
-	if p, ok := m.panes[pane]; ok {
-		return p.WindowName
+	return s.Type
+}
+
+func (m *model) showing(t target) bool {
+	if t.path != "" {
+		return m.cp.State.Viewing == t.path && m.cp.State.Borrowed == ""
 	}
-	return pane
+	return t.pane == m.cp.State.Borrowed
+}
+
+// follow shows the selection once the cursor has settled.
+func (m *model) follow() tea.Cmd {
+	t := m.selected()
+	if (t.pane == "" && t.path == "") || m.showing(t) {
+		return nil
+	}
+	return tea.Tick(showDelay, func(time.Time) tea.Msg { return showMsg{t} })
+}
+
+func (m *model) show(t target) {
+	var err error
+	switch {
+	case t.path != "":
+		err = m.cp.View(t.path, t.name)
+	case t.pane != "":
+		err = m.cp.Show(t.pane, t.name)
+	}
+	if err != nil {
+		m.flash = err.Error()
+	}
 }
 
 // ── update ──────────────────────────────────────────────
 
-func (m *model) Init() tea.Cmd {
-	return tea.Batch(tick(), spin(), m.loadGit(), m.loadBranches(), m.follow())
-}
+func (m *model) Init() tea.Cmd { return tea.Batch(tick(), spin(), m.loadGit(), m.follow()) }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -274,17 +338,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(func() tea.Msg { return m.scan() }, tick())
 	case scanMsg:
 		m.apply(msg)
-		return m, tea.Batch(m.loadGit(), m.loadBranches())
+		return m, m.loadGit()
 	case gitMsg:
 		m.git[msg.Dir] = gitinfo.Info(msg)
 		delete(m.loading, msg.Dir)
-	case branchMsg:
-		m.branches[msg.dir] = branch{name: msg.branch, at: time.Now()}
 	case showMsg:
-		if msg.pane == m.previewPane() { // still selected
-			if err := m.cp.Show(msg.pane, m.nameOf(msg.pane)); err != nil {
-				m.flash = err.Error()
-			}
+		if msg.target == m.selected() { // still selected
+			m.show(msg.target)
 		}
 	case tea.MouseMsg:
 		return m, m.mouse(msg)
@@ -306,6 +366,14 @@ func (m *model) mouse(msg tea.MouseMsg) tea.Cmd {
 	case msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft:
 		return nil
 	}
+	if msg.Y == m.gitTitleY {
+		for i, r := range m.gitTabsAt {
+			if msg.X >= r[0] && msg.X < r[1] {
+				m.focus, m.gitTab = fGit, i
+			}
+		}
+		return nil
+	}
 	if msg.Y < 0 || msg.Y >= len(m.clicks) || m.clicks[msg.Y].index < 0 {
 		return nil
 	}
@@ -314,47 +382,67 @@ func (m *model) mouse(msg tea.MouseMsg) tea.Cmd {
 	switch c.focus {
 	case fSpaces:
 		m.spaceSel = m.spaces[c.index].Name
-		m.apply(scanMsg{agents: m.agents, panes: m.panes})
+		m.refresh()
 		m.enterSpace()
 	case fAgents:
-		sp, _ := m.space()
-		m.agentSel = key(sp.Agents[c.index].Agent)
+		if rows := m.rows(); c.index < len(rows) {
+			m.rowSel = rows[c.index].key()
+			return tea.Batch(m.activate(), m.loadGit())
+		}
 	case fGit:
 		m.gitSel[m.gitTab] = c.index
+		return m.openGitItem()
 	}
 	return tea.Batch(m.follow(), m.loadGit())
 }
 
-// move steps the cursor of the focused section.
+// move steps the cursor, flowing from one section into the next at its edges.
 func (m *model) move(d int) tea.Cmd {
 	switch m.focus {
 	case fSpaces:
-		for i, sp := range m.spaces {
-			if sp.Name == m.spaceSel {
-				if j := i + d; j >= 0 && j < len(m.spaces) {
-					m.spaceSel = m.spaces[j].Name
-					m.agentSel = ""
-					m.apply(scanMsg{agents: m.agents, panes: m.panes})
-				}
-				break
+		i := m.spaceIndex()
+		switch j := i + d; {
+		case j >= len(m.spaces):
+			m.focus = fAgents
+			if rows := m.rows(); len(rows) > 0 {
+				m.rowSel = rows[0].key()
 			}
+		case j >= 0:
+			m.spaceSel, m.rowSel = m.spaces[j].Name, ""
+			m.refresh()
 		}
 	case fAgents:
-		sp, _ := m.space()
-		for i, it := range sp.Agents {
-			if key(it.Agent) == m.agentSel {
-				if j := i + d; j >= 0 && j < len(sp.Agents) {
-					m.agentSel = key(sp.Agents[j].Agent)
-				}
-				break
+		rows := m.rows()
+		_, i, _ := m.row()
+		switch j := i + d; {
+		case j < 0:
+			m.focus = fSpaces
+		case j >= len(rows):
+			if m.height >= 30 {
+				m.focus = fGit
 			}
+		default:
+			m.rowSel = rows[j].key()
 		}
 	case fGit:
 		n := len(m.gitItems())
-		m.gitSel[m.gitTab] = min(max(m.gitSel[m.gitTab]+d, 0), max(n-1, 0))
+		if j := m.gitSel[m.gitTab] + d; j < 0 {
+			m.focus = fAgents
+		} else {
+			m.gitSel[m.gitTab] = min(j, max(n-1, 0))
+		}
 		return nil
 	}
 	return tea.Batch(m.follow(), m.loadGit())
+}
+
+func (m *model) spaceIndex() int {
+	for i, sp := range m.spaces {
+		if sp.Name == m.spaceSel {
+			return i
+		}
+	}
+	return 0
 }
 
 func (m *model) key(k string) (tea.Model, tea.Cmd) {
@@ -365,7 +453,7 @@ func (m *model) key(k string) (tea.Model, tea.Cmd) {
 	case "esc":
 		if m.filter != "" {
 			m.filter = ""
-			m.apply(scanMsg{agents: m.agents, panes: m.panes})
+			m.refresh()
 			return m, nil
 		}
 		return m, tea.Quit
@@ -380,12 +468,13 @@ func (m *model) key(k string) (tea.Model, tea.Cmd) {
 		m.focus = (m.focus + 2) % 3
 		return m, m.follow()
 	case "left", "h":
-		if m.focus == fGit {
+		switch m.focus {
+		case fGit:
 			m.gitTab = (m.gitTab + 2) % 3
-		} else if m.focus == fAgents {
+		case fAgents:
 			m.focus = fSpaces
 		}
-	case "right", "l":
+	case "right", "l", "i":
 		switch m.focus {
 		case fGit:
 			m.gitTab = (m.gitTab + 1) % 3
@@ -402,20 +491,24 @@ func (m *model) key(k string) (tea.Model, tea.Cmd) {
 			m.focus = fAgents
 			return m, m.follow()
 		case fAgents:
-			m.typeInto()
+			return m, m.activate()
 		case fGit:
 			return m, m.openGitItem()
 		}
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		if i := int(k[0] - '1'); i < len(m.spaces) {
-			m.spaceSel, m.agentSel, m.focus = m.spaces[i].Name, "", fSpaces
-			m.apply(scanMsg{agents: m.agents, panes: m.panes})
+			m.spaceSel, m.rowSel, m.focus = m.spaces[i].Name, "", fSpaces
+			m.refresh()
 			return m, tea.Batch(m.follow(), m.loadGit())
 		}
 	case "g":
-		if pane := m.previewPane(); pane != "" {
+		if t := m.selected(); t.pane != "" {
 			m.cp.Restore()
-			m.t.Jump(pane)
+			m.t.Jump(t.pane)
+		}
+	case "r":
+		if sp, ok := m.space(); ok && sp.Name != "" {
+			m.input, m.buf = renameInput, sp.Name
 		}
 	case "!":
 		return m, m.nextNeedsYou()
@@ -436,6 +529,20 @@ func (m *model) key(k string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// activate is Enter on an agents row: show it now; a "+ N more" row unfolds.
+func (m *model) activate() tea.Cmd {
+	r, _, ok := m.row()
+	if !ok {
+		return nil
+	}
+	if r.more > 0 {
+		m.expanded[key(r.agent.Agent)] = true
+		return nil
+	}
+	m.show(m.selected())
+	return nil
+}
+
 // enterSpace switches the client to the selected space, taking the cockpit along.
 func (m *model) enterSpace() {
 	if m.spaceSel == "" || m.spaceSel == m.session {
@@ -447,7 +554,7 @@ func (m *model) enterSpace() {
 	m.session = m.cp.Session // moved even if the client couldn't follow
 }
 
-// typeInto puts the keyboard in the shown agent's pane.
+// typeInto puts the keyboard in the agent's pane; prefix+g brings it back.
 func (m *model) typeInto() {
 	if it, ok := m.agent(); ok && it.PaneID != "" {
 		m.cp.Show(it.PaneID, it.Name)
@@ -459,22 +566,27 @@ func (m *model) nextNeedsYou() tea.Cmd {
 	type pos struct{ sp, ag string }
 	var all []pos
 	cur := -1
+	selAgent := ""
+	if it, ok := m.agent(); ok {
+		selAgent = key(it.Agent)
+	}
 	for _, sp := range m.spaces {
 		for _, it := range sp.Agents {
-			if sp.Name == m.spaceSel && key(it.Agent) == m.agentSel {
+			here := sp.Name == m.spaceSel && key(it.Agent) == selAgent
+			if here {
 				cur = len(all)
 			}
-			if it.State == agents.NeedsYou || (sp.Name == m.spaceSel && key(it.Agent) == m.agentSel) {
+			if it.State == agents.NeedsYou || here {
 				all = append(all, pos{sp.Name, key(it.Agent)})
 			}
 		}
 	}
 	for i := 1; i <= len(all); i++ {
 		p := all[(max(cur, 0)+i)%len(all)]
-		if p.sp == m.spaceSel && p.ag == m.agentSel {
+		if p.sp == m.spaceSel && p.ag == selAgent {
 			continue
 		}
-		m.spaceSel, m.agentSel, m.focus = p.sp, p.ag, fAgents
+		m.spaceSel, m.rowSel, m.focus = p.sp, p.ag, fAgents
 		return tea.Batch(m.follow(), m.loadGit())
 	}
 	m.flash = "nobody needs you"
@@ -502,7 +614,7 @@ func (m *model) typing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.input == filterInput {
 		m.filter = m.buf
 	}
-	m.apply(scanMsg{agents: m.agents, panes: m.panes})
+	m.refresh()
 	return m, nil
 }
 
@@ -521,8 +633,27 @@ func (m *model) submit() (tea.Model, tea.Cmd) {
 		}
 	case spawnDirInput:
 		m.flash = m.spawn(m.spawnFor, buf)
+	case renameInput:
+		m.rename(buf)
 	}
 	return m, nil
+}
+
+func (m *model) rename(name string) {
+	old := m.spaceSel
+	if name == "" || name == old {
+		return
+	}
+	if err := m.t.RenameSession(old, name); err != nil {
+		m.flash = "rename: " + err.Error()
+		return
+	}
+	if old == m.session {
+		m.cp.Renamed(name)
+		m.session = name
+	}
+	m.spaceSel = name
+	m.apply(m.scan())
 }
 
 // targets are the marked agents, or the selected one.
@@ -577,11 +708,11 @@ func (m *model) spawn(name, dir string) string {
 	if it, ok := m.agent(); ok && it.ConfigDir != "" {
 		cmd = "CLAUDE_CONFIG_DIR=" + shellQuote(it.ConfigDir) + " " + cmd
 	}
-	target := m.spaceSel
-	if target == "" {
-		target = m.session
+	space := m.spaceSel
+	if space == "" {
+		space = m.session
 	}
-	pane, err := m.t.NewWindow(target+":", name, dir, cmd)
+	pane, err := m.t.NewWindow(space+":", name, dir, cmd)
 	if err != nil {
 		return "spawn failed: " + err.Error()
 	}
@@ -652,7 +783,7 @@ func (m *model) openGitItem() tea.Cmd {
 		for _, sp := range m.spaces {
 			for _, a := range sp.Agents {
 				if a.Cwd == it.wt.Path || strings.HasPrefix(a.Cwd, it.wt.Path+"/") {
-					m.spaceSel, m.agentSel, m.focus = sp.Name, key(a.Agent), fAgents
+					m.spaceSel, m.rowSel, m.focus = sp.Name, key(a.Agent), fAgents
 					return tea.Batch(m.follow(), m.loadGit())
 				}
 			}
@@ -671,386 +802,4 @@ func (m *model) popup(dir, cmd string) {
 	if err := m.t.Popup(m.session, dir, cmd); err != nil {
 		m.flash = "popup: " + err.Error()
 	}
-}
-
-// ── view ────────────────────────────────────────────────
-
-func age(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	d := time.Since(t)
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh", int(d.Hours()))
-	}
-	return fmt.Sprintf("%dd", int(d.Hours()/24))
-}
-
-func trunc(s string, w int) string {
-	if w <= 0 {
-		return ""
-	}
-	if r := []rune(s); len(r) > w {
-		return string(r[:w-1]) + "…"
-	}
-	return s
-}
-
-// block is a section's rendered lines with what each line selects.
-type block struct {
-	lines []string
-	idx   []int
-}
-
-func (b *block) add(s string, i int) { b.lines, b.idx = append(b.lines, s), append(b.idx, i) }
-
-// fit scrolls b to room lines keeping the lines of item sel visible.
-func (b block) fit(room, sel int) block {
-	if len(b.lines) <= room {
-		return b
-	}
-	first, last := -1, -1
-	for i, x := range b.idx {
-		if x == sel {
-			if first < 0 {
-				first = i
-			}
-			last = i
-		}
-	}
-	off := 0
-	if last >= room {
-		off = last - room + 1
-	}
-	if first >= 0 && first < off {
-		off = first
-	}
-	off = min(off, len(b.lines)-room)
-	return block{b.lines[off : off+room], b.idx[off : off+room]}
-}
-
-// box wraps a section in a rounded border with the title in the top edge,
-// herdr-style; the border lights up when the section has focus.
-func box(w int, focused bool, title, right []seg, body block, room int) block {
-	bc := lipgloss.NewStyle().Foreground(cSurface1)
-	if focused {
-		bc = lipgloss.NewStyle().Foreground(cMauve)
-	}
-	edge := func(segs []seg) (string, int) {
-		out, n := "", 0
-		for _, sg := range segs {
-			out += sg.style.Render(sg.text)
-			n += lipgloss.Width(sg.text)
-		}
-		return out, n
-	}
-	t, tw := edge(title)
-	r, rw := edge(right)
-	fill := max(w-4-tw-rw, 0)
-	top := bc.Render("╭─") + t + bc.Render(strings.Repeat("─", fill)) + r + bc.Render("─╮")
-	var b block
-	b.add(top, -1)
-	for i, l := range body.lines {
-		b.add(bc.Render("│")+l+bc.Render("│"), body.idx[i])
-	}
-	for range room - len(body.lines) {
-		b.add(bc.Render("│")+blanks(w-2)+bc.Render("│"), -1)
-	}
-	b.add(bc.Render("╰"+strings.Repeat("─", w-2)+"╯"), -1)
-	return b
-}
-
-func (m *model) title(text string, f focus) []seg {
-	st := sSub
-	if m.focus == f {
-		st = sAccent.Bold(true)
-	}
-	return []seg{{sDim, " "}, {st, text}, {sDim, " "}}
-}
-
-func (m *model) View() string {
-	w, h := max(m.width, 24), max(m.height, 16)
-	iw := w - 2 // inside the borders
-
-	// Spaces: two lines each.
-	var sb block
-	selSpace := 0
-	for i, sp := range m.spaces {
-		sel := sp.Name == m.spaceSel
-		if sel {
-			selSpace = i
-		}
-		hl := sel && m.focus == fSpaces
-		num := seg{sDim, fmt.Sprintf(" %d ", i+1)}
-		if i >= 9 {
-			num = seg{sDim, "   "}
-		}
-		if sel {
-			num.style = sAccent.Bold(true)
-		}
-		name := sp.Name
-		if name == "" {
-			name = "outside tmux"
-		}
-		nameStyle := sText
-		if sel || sp.Name == m.session {
-			nameStyle = sBold
-		}
-		var right []seg
-		if sp.Name == m.session {
-			right = append(right, seg{sAccent, "◆ "})
-		}
-		if n := len(sp.Agents); n > 0 {
-			right = append(right, seg{sDim, fmt.Sprintf("%d ", n)}, dot(sp.State), seg{sDim, " "})
-		}
-		sb.add(line(iw, hl, []seg{num, {nameStyle, trunc(name, iw-10)}}, right), i)
-		sub := m.branches[sp.Path].name
-		if sub == "" && sp.Path != "" {
-			sub = filepath.Base(sp.Path)
-		}
-		sb.add(line(iw, hl, []seg{{sDim, "   "}, {sBranch, trunc(sub, iw-4)}}, nil), i)
-	}
-
-	// Agents of the selected space, with their subagents.
-	sp, _ := m.space()
-	var ab block
-	selAgent := -1
-	for i, it := range sp.Agents {
-		sel := key(it.Agent) == m.agentSel
-		if sel {
-			selAgent = i
-		}
-		hl := sel && m.focus == fAgents
-		mark := seg{sDim, " "}
-		if m.marked[key(it.Agent)] {
-			mark = seg{sAccent, "✓"}
-		}
-		nameStyle := sBold
-		if it.PaneID != "" && it.PaneID == m.cp.State.Borrowed {
-			nameStyle = sAccent.Bold(true) // the one on screen
-		}
-		word := stateWord(it.State)
-		ab.add(line(iw, hl, []seg{{sDim, " "}, stateGlyph(it.State, m.frame), mark, {nameStyle, trunc(it.Name, iw-lipgloss.Width(word.text)-6)}},
-			[]seg{word, {sDim, " "}}), i)
-		sub := []seg{{sDim, "   "}, {sSub, trunc(it.Tab, iw/2)}}
-		if a := age(it.Since); a != "" {
-			sub = append(sub, seg{sDim, " · " + a})
-		}
-		if it.State == agents.NeedsYou && it.WaitingFor != "" {
-			sub = []seg{{sDim, "   "}, {sRed, trunc(it.WaitingFor, iw-4)}}
-		}
-		ab.add(line(iw, hl, sub, nil), i)
-		subs := m.subs[it.PID]
-		for j, sa := range subs {
-			branch := "├ "
-			if j == len(subs)-1 {
-				branch = "└ "
-			}
-			g := seg{sGreen, "✓"}
-			if sa.Running {
-				g = seg{sYellow, spinner[(m.frame+j)%len(spinner)]}
-			}
-			desc := sa.Desc
-			if desc == "" {
-				desc = sa.Type
-			}
-			a := age(sa.When)
-			ab.add(line(iw, hl, []seg{{sDim, "   " + branch}, g, {sSub, " " + trunc(desc, iw-len(a)-9)}}, []seg{{sDim, a + " "}}), i)
-		}
-	}
-	if len(sp.Agents) == 0 {
-		ab.add(line(iw, false, []seg{{sDim, " no agents here · n to start one"}}, nil), -1)
-	}
-
-	foot := m.footer(w)
-	spaceRoom := min(len(sb.lines), max(4, h/4))
-	gitRoom := h*30/100 - 2
-	small := h < 30 // no room for all three: git replaces agents while focused
-	if small {
-		gitRoom = h - (spaceRoom + 2) - len(foot) - 2
-	}
-	agentRoom := h - (spaceRoom + 2) - len(foot) - 2
-	if !small {
-		agentRoom -= gitRoom + 2
-	}
-	agentRoom = max(agentRoom, 2)
-	showAgents, showGit := !small || m.focus != fGit, !small || m.focus == fGit
-
-	c := map[agents.State]int{}
-	for _, s := range m.spaces {
-		for _, it := range s.Agents {
-			c[it.State]++
-		}
-	}
-	var sum []seg
-	if c[agents.NeedsYou] > 0 {
-		sum = append(sum, seg{sRed, fmt.Sprintf(" ! %d", c[agents.NeedsYou])})
-	}
-	sum = append(sum, seg{sYellow, fmt.Sprintf(" ● %d ", c[agents.Working])})
-
-	name := sp.Name
-	if name == "" {
-		name = "outside tmux"
-	}
-	var out []string
-	m.clicks = m.clicks[:0]
-	emit := func(b block, f focus) {
-		for i, l := range b.lines {
-			out = append(out, l)
-			m.clicks = append(m.clicks, click{f, b.idx[i]})
-		}
-	}
-	emit(box(w, m.focus == fSpaces, m.title("spaces", fSpaces), sum, sb.fit(spaceRoom, selSpace), spaceRoom), fSpaces)
-	if showAgents {
-		emit(box(w, m.focus == fAgents, m.title("agents", fAgents), []seg{{sDim, " " + trunc(name, w/3) + " "}}, ab.fit(agentRoom, selAgent), agentRoom), fAgents)
-	}
-	if showGit {
-		emit(box(w, m.focus == fGit, m.gitTitle(), nil, m.gitBlock(iw).fit(gitRoom, m.gitSel[m.gitTab]), gitRoom), fGit)
-	}
-	for _, l := range foot {
-		out = append(out, l)
-		m.clicks = append(m.clicks, click{fGit, -1})
-	}
-	return strings.Join(out, "\n")
-}
-
-func (m *model) gitTitle() []seg {
-	out := []seg{{sDim, " "}}
-	for i, t := range gitTabs {
-		st := sDim
-		if i == m.gitTab {
-			st = sSub.Bold(true)
-			if m.focus == fGit {
-				st = sAccent.Bold(true)
-			}
-		}
-		if i > 0 {
-			out = append(out, seg{sDim, " · "})
-		}
-		out = append(out, seg{st, t})
-	}
-	return append(out, seg{sDim, " "})
-}
-
-func (m *model) gitBlock(w int) block {
-	var b block
-	dir := m.dir()
-	info, have := m.git[dir]
-	switch {
-	case dir == "":
-		b.add(line(w, false, []seg{{sDim, "  nothing selected"}}, nil), -1)
-		return b
-	case !have:
-		b.add(line(w, false, []seg{{sDim, "  …"}}, nil), -1)
-		return b
-	case !info.Repo:
-		b.add(line(w, false, []seg{{sDim, "  " + trunc(filepath.Base(dir)+" is not a git repo", w-3)}}, nil), -1)
-		return b
-	}
-	focused := m.focus == fGit
-	sel := m.gitSel[m.gitTab]
-	num := func(f gitinfo.File) []seg {
-		if f.Status == '?' {
-			return nil
-		}
-		return []seg{{sGreen, fmt.Sprintf("+%d", f.Add)}, {sDim, "/"}, {sRed, fmt.Sprintf("-%d", f.Del)}, {sDim, " "}}
-	}
-	switch m.gitTab {
-	case 0:
-		ab := []seg{}
-		if info.Ahead > 0 {
-			ab = append(ab, seg{sGreen, fmt.Sprintf("↑%d", info.Ahead)})
-		}
-		if info.Behind > 0 {
-			ab = append(ab, seg{sRed, fmt.Sprintf("↓%d", info.Behind)})
-		}
-		add, del, files := info.Totals()
-		b.add(line(w, false, []seg{{sDim, "  "}, {sBranch, trunc(info.Branch, w-10)}}, append(ab, seg{sDim, " "})), -1)
-		b.add(line(w, false, []seg{{sDim, "  "}, {sGreen, fmt.Sprintf("+%d", add)}, {sDim, "/"}, {sRed, fmt.Sprintf("-%d", del)}},
-			[]seg{{sDim, fmt.Sprintf("%d files ", files)}}), -1)
-		idx := 0
-		section := func(title string, fs []gitinfo.File) {
-			if len(fs) == 0 {
-				return
-			}
-			b.add(line(w, false, []seg{{sSub, fmt.Sprintf("  %s (%d)", title, len(fs))}}, nil), -1)
-			for _, f := range fs {
-				st := sPeach
-				switch f.Status {
-				case 'A', '?':
-					st = sGreen
-				case 'D':
-					st = sRed
-				}
-				n := num(f)
-				nw := 0
-				for _, s := range n {
-					nw += lipgloss.Width(s.text)
-				}
-				b.add(line(w, focused && idx == sel, []seg{{sDim, "  "}, {st, string(f.Status)}, {sText, " " + trunc(f.Path, w-nw-6)}}, n), idx)
-				idx++
-			}
-		}
-		section("staged", info.Staged)
-		section("unstaged", info.Unstaged)
-		section("untracked", info.Untracked)
-		if files == 0 {
-			b.add(line(w, false, []seg{{sDim, "  clean"}}, nil), -1)
-		}
-	case 1:
-		for i, c := range info.Log {
-			a := age(c.When)
-			b.add(line(w, focused && i == sel, []seg{{sDim, "  "}, {sPeach, c.Hash}, {sText, " " + trunc(c.Subject, w-len(c.Hash)-len(a)-6)}},
-				[]seg{{sDim, a + " "}}), i)
-		}
-	case 2:
-		for i, wt := range info.Worktrees {
-			mark := seg{sDim, "  "}
-			if wt.Current {
-				mark = seg{sGreen, "● "}
-			}
-			b.add(line(w, focused && i == sel, []seg{{sDim, "  "}, mark, {sBranch, trunc(wt.Branch, w/2)}},
-				[]seg{{sDim, trunc(filepath.Base(wt.Path), w/2-6) + " "}}), i)
-		}
-	}
-	return b
-}
-
-func (m *model) footer(w int) []string {
-	in := func(label string) []string {
-		return []string{line(w, false, []seg{{sAccent, " " + label + " "}, {sText, m.buf}, {sAccent, "█"}}, nil)}
-	}
-	switch m.input {
-	case filterInput:
-		return in("filter")
-	case promptInput:
-		var names []string
-		for _, a := range m.targets() {
-			names = append(names, a.Name)
-		}
-		return []string{line(w, false, []seg{{sDim, trunc(" → "+strings.Join(names, ", "), w)}}, nil), in("prompt")[0]}
-	case spawnNameInput:
-		return in("new agent")
-	case spawnDirInput:
-		return in("in")
-	}
-	var hint string
-	switch m.focus {
-	case fSpaces:
-		hint = "↑↓ space  ⏎ agents  tab next  q close"
-	case fAgents:
-		hint = "⏎ type  g go  p prompt  n new  ! next  / find"
-	case fGit:
-		hint = "←→ tab  ↑↓ select  ⏎ open  tab next"
-	}
-	out := []string{}
-	if m.flash != "" {
-		out = append(out, line(w, false, []seg{{sSub, " " + trunc(m.flash, w-2)}}, nil))
-	}
-	return append(out, line(w, false, []seg{{sDim, " " + trunc(hint, w-2)}}, nil))
 }

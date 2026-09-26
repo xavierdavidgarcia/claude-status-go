@@ -4,6 +4,7 @@ package tmux
 
 import (
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -31,6 +32,7 @@ type Pane struct {
 	Active     bool   // active pane of its window
 	Path       string // pane_current_path
 	WinActive  bool   // its window is the session's current one
+	PID        int    // pane_pid: the pane's first process
 }
 
 func (p Pane) Location() string { return p.Session + ":" + p.Index }
@@ -38,16 +40,17 @@ func (p Pane) Location() string { return p.Session + ":" + p.Index }
 // Panes maps pane id to its current location.
 func (c *Client) Panes() map[string]Pane {
 	out, err := c.R.Run("list-panes", "-a", "-F",
-		"#{pane_id}\t#{session_name}\t#{window_id}\t#{window_index}\t#{window_name}\t#{pane_active}\t#{pane_current_path}\t#{window_active}")
+		"#{pane_id}\t#{session_name}\t#{window_id}\t#{window_index}\t#{window_name}\t#{pane_active}\t#{pane_current_path}\t#{window_active}\t#{pane_pid}")
 	panes := map[string]Pane{}
 	if err != nil {
 		return panes
 	}
 	for _, line := range strings.Split(out, "\n") {
 		f := strings.Split(line, "\t")
-		if len(f) == 8 {
+		if len(f) == 9 {
+			pid, _ := strconv.Atoi(f[8])
 			panes[f[0]] = Pane{ID: f[0], Session: f[1], Window: f[2], Index: f[3], WindowName: f[4],
-				Active: f[5] == "1", Path: f[6], WinActive: f[7] == "1"}
+				Active: f[5] == "1", Path: f[6], WinActive: f[7] == "1", PID: pid}
 		}
 	}
 	return panes
@@ -169,5 +172,16 @@ func (c *Client) SwitchTo(target string) error {
 		return err
 	}
 	_, err := c.R.Run("select-window", "-t", target)
+	return err
+}
+
+// Respawn replaces the program running in a pane.
+func (c *Client) Respawn(pane, cmd string) error {
+	_, err := c.R.Run("respawn-pane", "-k", "-t", pane, cmd)
+	return err
+}
+
+func (c *Client) RenameSession(old, name string) error {
+	_, err := c.R.Run("rename-session", "-t", old, name)
 	return err
 }

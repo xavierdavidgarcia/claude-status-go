@@ -109,7 +109,7 @@ Prefix here is `C-a`; `a` is taken (last-window), `g`/`G` are free.
 `run-shell` expands formats, so the binding passes the session and window.
 
 ```tmux
-bind g run-shell 'claude-status-go cockpit "#{session_name}" "#{window_id}"'
+bind g run-shell 'claude-status-go cockpit "#{session_name}" "#{window_id}" "#{pane_id}"'
 set -ag status-right ' #(claude-status-go count)'
 ```
 

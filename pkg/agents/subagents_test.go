@@ -1,8 +1,10 @@
 package agents
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -27,12 +29,17 @@ func TestSubagents(t *testing.T) {
 	const busy = `{"type":"assistant","message":{"stop_reason":"tool_use"}}`
 	write("run", "code review", busy, 10*time.Second)
 	write("fin", "explore repo", done, 2*time.Minute)
-	write("old", "long done", done, time.Hour)         // finished too long ago
+	write("old", "long done", done, time.Hour)
 	write("dead", "interrupted", busy, 10*time.Minute) // unfinished but silent
 
 	s := &Scanner{FS: diskFS{}}
-	got := s.Subagents(Agent{SessionID: "sess1", ConfigDir: cfg}, now)
-	if len(got) != 2 || got[0].Desc != "code review" || !got[0].Running || got[1].Desc != "explore repo" || got[1].Running {
-		t.Fatalf("%+v", got)
+	var summary []string
+	for _, g := range s.Subagents(Agent{SessionID: "sess1", ConfigDir: cfg}, now) {
+		summary = append(summary, fmt.Sprintf("%s:%d", g.Desc, g.State))
+	}
+	// Running first, then newest; silent unfinished ones are stopped.
+	want := "code review:0 explore repo:1 interrupted:2 long done:1"
+	if got := strings.Join(summary, " "); got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
 	}
 }

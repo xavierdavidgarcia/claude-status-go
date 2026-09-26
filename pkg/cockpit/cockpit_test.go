@@ -20,7 +20,7 @@ func (f *fakeTmux) Run(args ...string) (string, error) {
 	if args[0] == "list-panes" {
 		var lines []string
 		for _, p := range f.panes {
-			lines = append(lines, p+"\ts\t@1\t1\tw\t0\t/\t0")
+			lines = append(lines, p+"\ts\t@1\t1\tw\t0\t/\t0\t1")
 		}
 		return strings.Join(lines, "\n"), nil
 	}
@@ -111,16 +111,25 @@ func TestToggleClosesWhenLookingAtCockpit(t *testing.T) {
 	c, f := newTest(t, "%1", "%2", "%10")
 	c.Show("%10", "a")
 
-	c.Toggle("@7") // from another window: just focus the cockpit
+	c.Toggle("@7", "") // from another window: just focus the cockpit
 	if last := f.calls[len(f.calls)-1]; last != "select-window -t @50" {
 		t.Fatalf("expected focus, got %q", last)
 	}
-	c.Toggle("@50") // from the cockpit itself: return the agent, close
+	c.Toggle("@50", "%2") // from the cockpit list itself: return the agent, close
 	want := []string{"swap-pane -d -s %10 -t %1", "swap-pane -d -s %10 -t %1"}
 	if got := f.swaps(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("agent not returned: %q", got)
 	}
 	if last := f.calls[len(f.calls)-1]; last != "kill-window -t %1" {
 		t.Fatalf("cockpit not closed, last call %q", last)
+	}
+}
+
+func TestToggleFromShownPaneFocusesList(t *testing.T) {
+	c, f := newTest(t, "%1", "%2", "%10")
+	c.Show("%10", "a")
+	c.Toggle("@50", "%10") // typing in the agent: give the keyboard back
+	if last := f.calls[len(f.calls)-1]; last != "select-pane -t %2" {
+		t.Fatalf("expected list focus, got %q", last)
 	}
 }

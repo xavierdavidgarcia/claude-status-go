@@ -222,3 +222,28 @@ func Counts(as []Agent) map[State]int {
 	}
 	return c
 }
+
+// Descends reports whether pid is ancestor or one of its descendants: how a
+// Claude process is tied to the tmux pane (pane_pid) it runs in, whatever
+// server or session names say.
+func (s *Scanner) Descends(pid, ancestor int) bool {
+	for range 32 {
+		if pid == ancestor {
+			return true
+		}
+		if pid <= 1 {
+			return false
+		}
+		stat, err := s.FS.ReadFile(filepath.Join(s.Proc, strconv.Itoa(pid), "stat"))
+		if err != nil {
+			return false
+		}
+		i := strings.LastIndexByte(string(stat), ')')
+		f := strings.Fields(string(stat[i+1:]))
+		if i < 0 || len(f) < 2 {
+			return false
+		}
+		pid, _ = strconv.Atoi(f[1]) // field 4: ppid
+	}
+	return false
+}

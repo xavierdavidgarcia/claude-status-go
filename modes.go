@@ -19,7 +19,9 @@ func runCockpitMode(args []string) error {
 	switch args[0] {
 	case "sidebar":
 		return cockpit.Run(arg(1))
-	case "cockpit": // cockpit <session> <client window id>
+	case "transcript": // transcript <path> <title>
+		return cockpit.Transcript(arg(1), arg(2))
+	case "cockpit": // cockpit <session> <client window id> <client pane id>
 		t := tmux.New()
 		session := arg(1)
 		if session == "" {
@@ -28,7 +30,7 @@ func runCockpitMode(args []string) error {
 				return err
 			}
 		}
-		return cockpit.New(t, session).Toggle(arg(2))
+		return cockpit.New(t, session).Toggle(arg(2), arg(3))
 	case "placeholder":
 		return cockpit.Placeholder(arg(1))
 	case "count":

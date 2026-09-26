@@ -8,27 +8,39 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+)
+
+type SubState int
+
+const (
+	SubRunning SubState = iota
+	SubDone
+	SubStopped // unfinished and silent: interrupted or killed with its session
 )
 
 // Sub is a subagent (Agent/Task tool) launched by a Claude session. Claude
 // writes each one to <config>/projects/<project>/<session>/subagents/.
 type Sub struct {
-	ID      string
-	Desc    string
-	Type    string
-	Running bool
-	When    time.Time // last transcript write
+	ID    string
+	Desc  string
+	Type  string
+	State SubState
+	When  time.Time // last transcript write
+	Path  string    // transcript (.jsonl)
 }
 
-const (
-	subRecent = 15 * time.Minute // finished subagents stay listed this long
-	subStale  = 5 * time.Minute  // unfinished but silent this long: gone
-	subMax    = 4
-)
+const subSilent = 5 * time.Minute // unfinished and quiet this long: stopped
 
-// Subagents lists a session's running and recently finished subagents,
-// newest first.
+type subCache struct {
+	mu    sync.Mutex
+	byKey map[string]bool // "path|size|mtime" → finished
+}
+
+var finishedCache = subCache{byKey: map[string]bool{}}
+
+// Subagents lists all of a session's subagents: running first, then newest.
 func (s *Scanner) Subagents(a Agent, now time.Time) []Sub {
 	if a.SessionID == "" || a.ConfigDir == "" {
 		return nil
@@ -37,8 +49,9 @@ func (s *Scanner) Subagents(a Agent, now time.Time) []Sub {
 	var out []Sub
 	for _, meta := range metas {
 		base := strings.TrimSuffix(meta, ".meta.json")
-		st, err := os.Stat(base + ".jsonl")
-		if err != nil || now.Sub(st.ModTime()) > subRecent {
+		path := base + ".jsonl"
+		st, err := os.Stat(path)
+		if err != nil {
 			continue
 		}
 		var m struct {
@@ -48,44 +61,60 @@ func (s *Scanner) Subagents(a Agent, now time.Time) []Sub {
 		if data, err := s.FS.ReadFile(meta); err == nil {
 			_ = json.Unmarshal(data, &m)
 		}
-		done := finished(base + ".jsonl")
-		if !done && now.Sub(st.ModTime()) > subStale {
-			continue
+		state := SubDone
+		if !cachedFinished(path, st) {
+			state = SubRunning
+			if now.Sub(st.ModTime()) > subSilent {
+				state = SubStopped
+			}
 		}
 		out = append(out, Sub{
-			ID:      strings.TrimPrefix(filepath.Base(base), "agent-"),
-			Desc:    m.Description,
-			Type:    m.AgentType,
-			Running: !done,
-			When:    st.ModTime(),
+			ID:    strings.TrimPrefix(filepath.Base(base), "agent-"),
+			Desc:  m.Description,
+			Type:  m.AgentType,
+			State: state,
+			When:  st.ModTime(),
+			Path:  path,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Running != out[j].Running {
-			return out[i].Running
+		if (out[i].State == SubRunning) != (out[j].State == SubRunning) {
+			return out[i].State == SubRunning
 		}
 		return out[i].When.After(out[j].When)
 	})
-	if len(out) > subMax {
-		out = out[:subMax]
-	}
 	return out
+}
+
+// cachedFinished re-reads a transcript's tail only when it has changed.
+func cachedFinished(path string, st os.FileInfo) bool {
+	k := path + "|" + st.ModTime().String()
+	finishedCache.mu.Lock()
+	done, ok := finishedCache.byKey[k]
+	finishedCache.mu.Unlock()
+	if ok {
+		return done
+	}
+	done = finished(path)
+	finishedCache.mu.Lock()
+	finishedCache.byKey[k] = done
+	finishedCache.mu.Unlock()
+	return done
 }
 
 // finished reports whether a transcript ends with the subagent's final answer.
 func finished(path string) bool {
-	last := lastLine(path)
 	var e struct {
 		Type    string `json:"type"`
 		Message struct {
 			StopReason string `json:"stop_reason"`
 		} `json:"message"`
 	}
-	return json.Unmarshal(last, &e) == nil && e.Type == "assistant" && e.Message.StopReason == "end_turn"
+	return json.Unmarshal(LastLine(path), &e) == nil && e.Type == "assistant" && e.Message.StopReason == "end_turn"
 }
 
-// lastLine reads only the tail of a possibly large transcript.
-func lastLine(path string) []byte {
+// LastLine reads only the tail of a possibly large transcript.
+func LastLine(path string) []byte {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil

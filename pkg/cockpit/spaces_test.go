@@ -1,6 +1,7 @@
 package cockpit
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -106,5 +107,32 @@ func TestForeignPaneIDIsNotTrusted(t *testing.T) {
 	last := sps[len(sps)-1]
 	if last.Name != "" || last.Agents[0].PaneID != "" {
 		t.Fatalf("foreign pane should be outside tmux and unswappable: %+v", last)
+	}
+}
+
+func TestSpaceLabel(t *testing.T) {
+	sps := buildSpaces(spaceInput{panes: testPanes()})
+	got := map[string]string{}
+	for _, sp := range sps {
+		got[sp.Name] = sp.Label() + fmt.Sprintf(" (%d tabs)", len(sp.Tabs))
+	}
+	if got["0"] != "0 · unifi, ephemer (3 tabs)" || got["work"] != "work (1 tabs)" || got["2"] != "2 (0 tabs)" {
+		t.Fatalf("%v", got)
+	}
+}
+
+func TestOwnershipByProcess(t *testing.T) {
+	panes := testPanes()
+	p3 := panes["%3"]
+	p3.PID = 500
+	panes["%3"] = p3
+	as := []agents.Agent{
+		{Name: "mine", PID: 501, PaneID: "%3", TmuxSess: "0", State: agents.Idle},
+		{Name: "other-server", PID: 900, PaneID: "%3", TmuxSess: "0", State: agents.Idle}, // same id and session name
+	}
+	owns := func(a agents.Agent, p tmux.Pane) bool { return a.PID == 501 && p.PID == 500 }
+	got := summary(buildSpaces(spaceInput{agents: as, panes: panes, owns: owns}))
+	if !strings.Contains(got, "mine@10 infra") || !strings.Contains(got, "[ idle other-server@]") {
+		t.Fatalf("got %s", got)
 	}
 }
