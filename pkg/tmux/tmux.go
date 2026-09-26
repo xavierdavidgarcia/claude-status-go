@@ -185,3 +185,15 @@ func (c *Client) RenameSession(old, name string) error {
 	_, err := c.R.Run("rename-session", "-t", old, name)
 	return err
 }
+
+// Unset removes a pane option.
+func (c *Client) Unset(pane, name string) error {
+	_, err := c.R.Run("set-option", "-p", "-u", "-t", pane, name)
+	return err
+}
+
+// BreakPane moves a pane into a new window of session, in the background.
+func (c *Client) BreakPane(pane, session, name string) error {
+	_, err := c.R.Run("break-pane", "-d", "-s", pane, "-t", session+":", "-n", name)
+	return err
+}

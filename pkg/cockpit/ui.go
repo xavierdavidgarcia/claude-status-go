@@ -649,7 +649,7 @@ func (m *model) rename(name string) {
 		return
 	}
 	if old == m.session {
-		m.cp.Renamed(name)
+		m.cp.Session = name
 		m.session = name
 	}
 	m.spaceSel = name

@@ -95,10 +95,11 @@ func buildSpaces(in spaceInput) []space {
 			get(name).Tabs = append(get(name).Tabs, p.WindowName)
 		}
 	}
-	// A session looking at its cockpit still gets a folder for its branch line.
+	// A session looking at its cockpit still gets a pane to preview.
 	for _, p := range in.panes {
-		if sp := byName[p.Session]; sp.Path == "" && p.Active && p.WindowName != WindowName {
-			sp.Path = lent(p).Path
+		if sp := byName[p.Session]; sp.ActivePane == "" && p.Active && p.WindowName != WindowName {
+			q := lent(p)
+			sp.ActivePane, sp.Path = q.ID, q.Path
 		}
 	}
 

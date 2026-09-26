@@ -27,23 +27,33 @@ type placeholder struct {
 	width, height int
 }
 
-func (p *placeholder) Init() tea.Cmd { return tick() }
+func (p *placeholder) Init() tea.Cmd { p.load(); return tick() }
 
 func (p *placeholder) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		p.width, p.height = msg.Width, msg.Height
 	case tickMsg:
-		p.cp.load()
+		p.load()
 		return p, tick()
 	case tea.KeyMsg:
 		if msg.Type == tea.KeyEnter && p.away() {
 			agent := p.cp.State.Borrowed
-			p.cp.Restore()
+			p.cp.restore(p.cp.State)
 			p.t.SelectPane(agent)
 		}
 	}
 	return p, nil
+}
+
+// load finds the cockpit this slot belongs to.
+func (p *placeholder) load() {
+	p.cp.State = Layout{}
+	for _, l := range p.cp.layouts() {
+		if l.Slot == p.self {
+			p.cp.State = l
+		}
+	}
 }
 
 // away reports whether this slot is parked in a borrowed agent's window.
@@ -54,7 +64,7 @@ func (p *placeholder) away() bool {
 func (p *placeholder) View() string {
 	msg := sDim.Render("select a space or an agent")
 	if p.away() {
-		msg = sAccent.Bold(true).Render(p.cp.State.BorrowedName) + sSub.Render(" is in the cockpit") + "\n\n" +
+		msg = sAccent.Bold(true).Render(p.cp.State.Name) + sSub.Render(" is in the cockpit") + "\n\n" +
 			sDim.Render("⏎ bring it back here")
 	}
 	return lipgloss.Place(p.width, p.height, lipgloss.Center, lipgloss.Center, msg)
