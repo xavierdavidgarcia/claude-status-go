@@ -166,9 +166,31 @@ func (c *Client) MoveWindow(window, session string) error {
 	return err
 }
 
-// SwitchTo shows target (a window or pane) on the attached client.
-func (c *Client) SwitchTo(target string) error {
-	if _, err := c.R.Run("switch-client", "-t", target); err != nil {
+// ActiveClient returns the client that last had input: the one the user is
+// on. Other clients may show the same window (every client of a session does).
+func (c *Client) ActiveClient() string {
+	out, err := c.R.Run("list-clients", "-F", "#{client_activity}\t#{client_name}")
+	if err != nil {
+		return ""
+	}
+	best, name := -1, ""
+	for _, l := range strings.Split(out, "\n") {
+		if t, n, ok := strings.Cut(l, "\t"); ok {
+			if v, _ := strconv.Atoi(t); v > best {
+				best, name = v, n
+			}
+		}
+	}
+	return name
+}
+
+// SwitchTo shows target (a window or pane) on client; "" lets tmux pick one.
+func (c *Client) SwitchTo(client, target string) error {
+	args := []string{"switch-client", "-t", target}
+	if client != "" {
+		args = append(args, "-c", client)
+	}
+	if _, err := c.R.Run(args...); err != nil {
 		return err
 	}
 	_, err := c.R.Run("select-window", "-t", target)

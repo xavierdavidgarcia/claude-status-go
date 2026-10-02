@@ -168,6 +168,9 @@ func (m *model) apply(s scanMsg) {
 		m.subs = s.subs
 	}
 	m.cp.load()
+	if m.cp.State.Session != "" { // prefix+g from another session moves the cockpit
+		m.session = m.cp.State.Session
+	}
 	m.spaces = buildSpaces(spaceInput{agents: m.agents, panes: m.panes,
 		borrowed: m.cp.State.Borrowed, slot: m.cp.State.Slot, filter: m.filter, owns: m.owns})
 	if _, ok := m.space(); !ok && len(m.spaces) > 0 {
@@ -381,6 +384,9 @@ func (m *model) mouse(msg tea.MouseMsg) tea.Cmd {
 	m.focus = c.focus
 	switch c.focus {
 	case fSpaces:
+		if c.index >= len(m.spaces) { // spaces changed since the last render
+			return nil
+		}
 		m.spaceSel = m.spaces[c.index].Name
 		m.refresh()
 		m.enterSpace()
@@ -418,9 +424,7 @@ func (m *model) move(d int) tea.Cmd {
 		case j < 0:
 			m.focus = fSpaces
 		case j >= len(rows):
-			if m.height >= 30 {
-				m.focus = fGit
-			}
+			m.focus = fGit // on a short pane it takes the agents box's place
 		default:
 			m.rowSel = rows[j].key()
 		}
@@ -448,15 +452,11 @@ func (m *model) spaceIndex() int {
 func (m *model) key(k string) (tea.Model, tea.Cmd) {
 	m.flash = ""
 	switch k {
-	case "q", "ctrl+c":
-		return m, tea.Quit
+	// No quit key: quitting closes the cockpit, and q, esc or ctrl+c meant for
+	// an agent land here after a click. prefix+g closes it.
 	case "esc":
-		if m.filter != "" {
-			m.filter = ""
-			m.refresh()
-			return m, nil
-		}
-		return m, tea.Quit
+		m.filter = ""
+		m.refresh()
 	case "j", "down":
 		return m, m.move(1)
 	case "k", "up":
@@ -540,18 +540,20 @@ func (m *model) activate() tea.Cmd {
 		return nil
 	}
 	m.show(m.selected())
+	m.enterSpace() // the status bar then lists the agent's session's tabs
 	return nil
 }
 
 // enterSpace switches the client to the selected space, taking the cockpit along.
 func (m *model) enterSpace() {
-	if m.spaceSel == "" || m.spaceSel == m.session {
+	m.cp.load()
+	if m.spaceSel == "" || m.spaceSel == m.cp.State.Session {
 		return
 	}
 	if err := m.cp.MoveTo(m.spaceSel); err != nil {
 		m.flash = "switch: " + err.Error()
 	}
-	m.session = m.cp.Session // moved even if the client couldn't follow
+	m.session = m.cp.State.Session // moved even if the client couldn't follow
 }
 
 // typeInto puts the keyboard in the agent's pane; prefix+g brings it back.

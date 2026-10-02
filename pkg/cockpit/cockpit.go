@@ -200,13 +200,15 @@ func (c *Cockpit) MoveTo(session string) error {
 	if c.State.Window == "" {
 		return fmt.Errorf("no cockpit")
 	}
+	// Left to itself tmux picks a client of the new session, not the user's.
+	client := c.T.ActiveClient()
 	if c.State.Session != session {
 		if err := c.T.MoveWindow(c.State.Window, session); err != nil {
 			return err
 		}
 		c.State.Session = session
 	}
-	return c.T.SwitchTo(c.State.Window)
+	return c.T.SwitchTo(client, c.State.Window)
 }
 
 // Show swaps a pane into the slot, returning any other borrowed pane first.

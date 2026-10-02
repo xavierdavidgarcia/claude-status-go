@@ -16,6 +16,9 @@ type fakeTmux struct {
 	wins  map[string]*fwin
 	next  int
 	calls []string
+	// client name -> window it shows
+	clients map[string]string
+	active  string // client with the latest input
 }
 
 type fpane struct {
@@ -26,7 +29,7 @@ type fpane struct {
 type fwin struct{ id, name, session string }
 
 func newFake() *fakeTmux {
-	return &fakeTmux{panes: map[string]*fpane{}, wins: map[string]*fwin{}, next: 100}
+	return &fakeTmux{panes: map[string]*fpane{}, wins: map[string]*fwin{}, next: 100, clients: map[string]string{}}
 }
 
 // window adds a window with one pane and returns the pane id.
@@ -133,6 +136,21 @@ func (f *fakeTmux) Run(args ...string) (string, error) {
 		p.win = w.id
 	case "move-window":
 		f.winOf(arg(args, "-s")).session = strings.TrimSuffix(arg(args, "-t"), ":")
+	case "list-clients":
+		var lines []string
+		for name := range f.clients {
+			t := "100"
+			if name == f.active {
+				t = "200"
+			}
+			lines = append(lines, t+"\t"+name)
+		}
+		return strings.Join(lines, "\n"), nil
+	case "switch-client":
+		if _, ok := f.clients[arg(args, "-c")]; !ok {
+			return "", fmt.Errorf("no current client")
+		}
+		f.clients[arg(args, "-c")] = f.winOf(arg(args, "-t")).id
 	}
 	return "", nil
 }
@@ -205,6 +223,26 @@ func TestToggleFromAnotherSessionMovesTheCockpit(t *testing.T) {
 	other.Toggle("@elsewhere", "")
 	if len(other.layouts()) != 1 || f.wins[other.State.Window].session != "work" {
 		t.Fatalf("expected the one cockpit moved to work, got %+v", other.layouts())
+	}
+}
+
+// The client to switch is the one in use, not any client showing the
+// cockpit: an idle terminal on the cockpit's session shows it too.
+func TestMoveToSwitchesTheActiveClient(t *testing.T) {
+	f, c, _, _ := setup(t)
+	f.window("work", "api")
+	f.clients["/dev/pts/1"] = c.State.Window // idle, on session 0
+	f.clients["/dev/pts/2"] = "@elsewhere"
+	f.active = "/dev/pts/2"
+
+	if err := c.MoveTo("work"); err != nil {
+		t.Fatal(err)
+	}
+	if f.wins[c.State.Window].session != "work" || f.clients["/dev/pts/2"] != c.State.Window {
+		t.Fatalf("cockpit in %q, active client on %q", f.wins[c.State.Window].session, f.clients["/dev/pts/2"])
+	}
+	if f.clients["/dev/pts/1"] != c.State.Window { // untouched
+		t.Fatal("idle client was switched")
 	}
 }
 
