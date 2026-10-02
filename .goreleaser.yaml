@@ -1,6 +1,6 @@
 project_name: claude-status-go
 builds:
-- main: ./main.go
+- main: .
   binary: claude-status-go
   goos:
     - darwin
