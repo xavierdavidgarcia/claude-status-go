@@ -143,7 +143,7 @@ var themes = map[string]Theme{
 // Resolved theme colors — set in main()
 var (
 	blue, orange, green, cyan, red, yellow, white, magenta string
-	sep                                                     string
+	sep                                                    string
 )
 
 func resolveTheme() string {
@@ -202,6 +202,7 @@ func applyTheme(name string) {
 
 // ── Input JSON structures ───────────────────────────────
 type Input struct {
+	SessionID     string        `json:"session_id"`
 	Model         ModelInfo     `json:"model"`
 	ContextWindow ContextWindow `json:"context_window"`
 	Session       Session       `json:"session"`
@@ -210,11 +211,11 @@ type Input struct {
 }
 
 type CostInfo struct {
-	TotalCostUSD      float64 `json:"total_cost_usd"`
-	TotalDurationMs   int64   `json:"total_duration_ms"`
-	TotalApiDurationMs int64  `json:"total_api_duration_ms"`
-	TotalLinesAdded   int     `json:"total_lines_added"`
-	TotalLinesRemoved int     `json:"total_lines_removed"`
+	TotalCostUSD       float64 `json:"total_cost_usd"`
+	TotalDurationMs    int64   `json:"total_duration_ms"`
+	TotalApiDurationMs int64   `json:"total_api_duration_ms"`
+	TotalLinesAdded    int     `json:"total_lines_added"`
+	TotalLinesRemoved  int     `json:"total_lines_removed"`
 }
 
 type ModelInfo struct {
@@ -391,6 +392,12 @@ func gitShortCommit(cwd string) string {
 	return strings.TrimSpace(string(out))
 }
 
+func gitCommitPushed(cwd string) bool {
+	// Check if HEAD is an ancestor of the remote tracking branch
+	err := exec.Command("git", "-C", cwd, "merge-base", "--is-ancestor", "HEAD", "@{u}").Run()
+	return err == nil
+}
+
 type PRInfo struct {
 	Number int
 	URL    string
@@ -415,10 +422,66 @@ func termLink(text, url string) string {
 }
 
 // ── OAuth token resolution ──────────────────────────────
+func claudeConfigDir() string {
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return dir
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude")
+}
+
+// peerName returns the name other sessions use to message this one (SendMessage).
+// Claude Code registers it in <config>/sessions/<pid>.json; the statusline's
+// session_name is the conversation title, not this name.
+func peerName(ppid int, sessionID string) string {
+	dir := filepath.Join(claudeConfigDir(), "sessions")
+	read := func(path string) string {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return ""
+		}
+		var reg struct {
+			SessionID string `json:"sessionId"`
+			Name      string `json:"name"`
+		}
+		if json.Unmarshal(data, &reg) != nil || (sessionID != "" && reg.SessionID != sessionID) {
+			return ""
+		}
+		return reg.Name
+	}
+	if name := read(filepath.Join(dir, fmt.Sprintf("%d.json", ppid))); name != "" {
+		return name
+	}
+	if sessionID == "" {
+		return ""
+	}
+	// Statusline may run under a wrapper shell, so PPID isn't always the claude pid.
+	files, _ := filepath.Glob(filepath.Join(dir, "*.json"))
+	for _, f := range files {
+		if name := read(f); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func usageCachePath() string {
+	return filepath.Join(claudeConfigDir(), "statusline-cache", "usage.json")
+}
+
 func getOAuthToken() string {
 	// 1. Environment variable
 	if token := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); token != "" {
 		return token
+	}
+
+	// An explicit profile must never fall back to the default account.
+	// Linux profile logins are stored here. If absent, omit usage data.
+	if os.Getenv("CLAUDE_CONFIG_DIR") != "" {
+		if data, err := os.ReadFile(filepath.Join(claudeConfigDir(), ".credentials.json")); err == nil {
+			return extractAccessToken(data)
+		}
+		return ""
 	}
 
 	// 2. macOS Keychain
@@ -466,12 +529,12 @@ func extractAccessToken(data []byte) string {
 // ── Usage data fetch with cache ─────────────────────────
 const (
 	cacheDir    = "/tmp/claude"
-	cacheFile   = "/tmp/claude/statusline-usage-cache.json"
 	cacheMaxAge = 60 // seconds
 )
 
 func fetchUsageData() *UsageResponse {
-	_ = os.MkdirAll(cacheDir, 0755)
+	cacheFile := usageCachePath()
+	_ = os.MkdirAll(filepath.Dir(cacheFile), 0700)
 
 	// Check cache
 	if info, err := os.Stat(cacheFile); err == nil {
@@ -502,8 +565,8 @@ func fetchUsageData() *UsageResponse {
 				defer resp.Body.Close()
 				body, _ := io.ReadAll(resp.Body)
 				var usage UsageResponse
-				if json.Unmarshal(body, &usage) == nil {
-					_ = os.WriteFile(cacheFile, body, 0644)
+				if resp.StatusCode == http.StatusOK && json.Unmarshal(body, &usage) == nil {
+					_ = os.WriteFile(cacheFile, body, 0600)
 					return &usage
 				}
 			}
@@ -523,8 +586,7 @@ func fetchUsageData() *UsageResponse {
 
 // ── Effort level from settings ──────────────────────────
 func getEffortLevel() string {
-	home, _ := os.UserHomeDir()
-	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	data, err := os.ReadFile(filepath.Join(claudeConfigDir(), "settings.json"))
 	if err != nil {
 		return "default"
 	}
@@ -595,6 +657,16 @@ func nextMonthFirstDay() string {
 }
 
 func main() {
+	if len(os.Args) > 1 {
+		if err := runCockpitMode(os.Args[1:]); err != errNotCockpit {
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
+
 	// Resolve and apply theme early so colors are available everywhere
 	themeName := resolveTheme()
 	applyTheme(themeName)
@@ -644,7 +716,7 @@ func main() {
 				TotalLinesRemoved:  37,
 				TotalApiDurationMs: 198000,
 			},
-			Cwd:     cwd,
+			Cwd: cwd,
 			ContextWindow: ContextWindow{
 				ContextWindowSize: 200000,
 				TotalOutputTokens: 24500,
@@ -739,14 +811,20 @@ func main() {
 		}
 	}
 
-	// ── LINE 1: Hostname │ Model │ Context % │ Session │ Effort ────
-	hostname, _ := os.Hostname()
-	if idx := strings.Index(hostname, "."); idx != -1 {
-		hostname = hostname[:idx]
+	// ── LINE 1: Session name │ Model │ Context % │ Session │ Effort ────
+	label := ""
+	if !standalone {
+		label = peerName(os.Getppid(), data.SessionID)
+	}
+	if label == "" {
+		label, _ = os.Hostname()
+		if idx := strings.Index(label, "."); idx != -1 {
+			label = label[:idx]
+		}
 	}
 	pctColor := colorForPct(pctUsed)
 
-	line1 := "💻 " + magenta + hostname + reset
+	line1 := "💻 " + magenta + label + reset
 	line1 += sep
 	line1 += blue + modelName + reset
 	line1 += sep
@@ -815,10 +893,14 @@ func main() {
 		line2 += " " + green + "(" + branch + dirtyStr + green + statsStr + green + ")" + reset
 	}
 
-	// Short commit SHA
+	// Short commit SHA — green if pushed, red if not
 	shortCommit := gitShortCommit(cwd)
 	if shortCommit != "" {
-		line2 += " " + dim + shortCommit + reset
+		commitColor := red
+		if gitCommitPushed(cwd) {
+			commitColor = green
+		}
+		line2 += " " + commitColor + shortCommit + reset
 	}
 
 	// PR info (clickable link)

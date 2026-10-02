@@ -35,8 +35,10 @@ install: build
 		cp "$(INSTALL_DIR)/$(BINARY)" "$(INSTALL_DIR)/$(BINARY).bak"; \
 		echo "✓ Backed up existing binary to $(BINARY).bak"; \
 	fi
-	@cp $(BINARY) $(INSTALL_DIR)/$(BINARY)
-	@chmod 755 $(INSTALL_DIR)/$(BINARY)
+	@# rename, not overwrite: cp fails with "text file busy" while the statusline runs
+	@cp $(BINARY) $(INSTALL_DIR)/$(BINARY).new
+	@chmod 755 $(INSTALL_DIR)/$(BINARY).new
+	@mv -f $(INSTALL_DIR)/$(BINARY).new $(INSTALL_DIR)/$(BINARY)
 	@echo "✓ Installed binary to $(INSTALL_DIR)/$(BINARY)"
 	@# Build command with optional flags
 	@CMD="$$HOME/.claude/$(BINARY)"; \

@@ -138,6 +138,46 @@ Parses `git status --porcelain` to show:
 
 For extra usage, shows daily spend rate and projected monthly total. Only displayed after day 1 of the month. Projection color: green (<80% of limit), yellow (80-100%), red (over limit).
 
+## Cockpit (tmux)
+
+A herdr-style side panel for tmux: **spaces** (your tmux sessions) on top,
+the Claude **agents** of the selected space with their subagents below, and
+the git state of the selection at the bottom. The right side follows the
+cursor: an agent's real pane is swapped in live; a subagent shows its
+transcript as it runs.
+
+```tmux
+bind g run-shell '~/.claude/claude-status-go cockpit "#{session_name}" "#{window_id}" "#{pane_id}"'
+set -ag status-right ' #(~/.claude/claude-status-go count)'
+```
+
+`prefix g` opens the cockpit. From an agent you're typing into it brings the
+keyboard back to the list; from the list it closes the cockpit and puts every
+pane back.
+
+| Key | |
+|---|---|
+| `↑↓` `jk` | move through spaces, agents and git as one list; the right side follows |
+| `tab` / `shift+tab` | jump to the next / previous section |
+| `⏎` / click | space: switch your client to it, cockpit included · agent: show it · `+ N more`: unfold subagents · git: open diff / commit / worktree |
+| `→` `i` | type into the agent (`prefix g` to come back) |
+| `←→` | git: changes / log / worktrees (or click the tab name) |
+| `1`–`9` · `r` | preview space n · rename the space (tmux session) |
+| `g` | go to the agent's own window |
+| `p` · `space` | prompt the agent, or the marked ones (refused while one waits on a permission prompt) |
+| `n` · `!` · `/` · `q` | new agent in a git worktree · next agent that needs you · filter · close |
+
+Agents: `!` needs you, spinner working, `✓` idle, `$` in a shell. Subagents
+(Agent/Task tool): spinner running, `✓` done, `✗` stopped; running ones and
+the latest three are listed, older ones fold under `+ N more`. They're read
+from Claude's own `subagents/` transcripts, no hook needed.
+
+Spaces named only by tmux's number show their first tabs (`0 · Unifi,
+Ephemer`); `r` gives them a real name.
+
+Don't `kill-window` the cockpit while an agent is shown in it: tmux kills that
+agent too. Use `q` or `prefix g`.
+
 ## Requirements
 
 - `jq` — used by the installer to update `settings.json`
