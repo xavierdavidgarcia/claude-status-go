@@ -404,7 +404,9 @@ type PRInfo struct {
 }
 
 func gitPRInfo(cwd string) PRInfo {
-	out, err := exec.Command("gh", "pr", "view", "--json", "number,url", "-q", ".number,.url").Output()
+	cmd := exec.Command("gh", "pr", "view", "--json", "number,url", "-q", ".number,.url")
+	cmd.Dir = cwd
+	out, err := cmd.Output()
 	if err != nil {
 		return PRInfo{}
 	}
@@ -415,6 +417,47 @@ func gitPRInfo(cwd string) PRInfo {
 	num := 0
 	fmt.Sscanf(lines[0], "%d", &num)
 	return PRInfo{Number: num, URL: strings.TrimSpace(lines[1])}
+}
+
+// repoWebURL turns a git remote URL (ssh or https) into the repo's web page.
+func repoWebURL(remote string) string {
+	r := strings.TrimSuffix(strings.TrimSpace(remote), ".git")
+	switch {
+	case strings.HasPrefix(r, "git@"):
+		host, path, ok := strings.Cut(strings.TrimPrefix(r, "git@"), ":")
+		if !ok {
+			return ""
+		}
+		return "https://" + host + "/" + path
+	case strings.HasPrefix(r, "ssh://"):
+		r = strings.TrimPrefix(r, "ssh://")
+		if i := strings.IndexByte(r, '@'); i >= 0 {
+			r = r[i+1:]
+		}
+		return "https://" + r
+	case strings.HasPrefix(r, "https://"), strings.HasPrefix(r, "http://"):
+		if i, j := strings.Index(r, "://"), strings.IndexByte(r, '@'); j > i {
+			r = r[:i+3] + r[j+1:] // drop embedded credentials
+		}
+		return r
+	}
+	return ""
+}
+
+// gitBranchURL is the branch's page on origin; "" when it isn't pushed there.
+func gitBranchURL(cwd, branch string) string {
+	if exec.Command("git", "-C", cwd, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+branch).Run() != nil {
+		return ""
+	}
+	out, err := exec.Command("git", "-C", cwd, "remote", "get-url", "origin").Output()
+	if err != nil {
+		return ""
+	}
+	base := repoWebURL(string(out))
+	if base == "" {
+		return ""
+	}
+	return base + "/tree/" + branch
 }
 
 func termLink(text, url string) string {
@@ -890,7 +933,11 @@ func main() {
 		if gStats.Modified > 0 {
 			statsStr += " " + yellow + fmt.Sprintf("~%d", gStats.Modified) + reset
 		}
-		line2 += " " + green + "(" + branch + dirtyStr + green + statsStr + green + ")" + reset
+		branchText := green + branch
+		if url := gitBranchURL(cwd, branch); url != "" {
+			branchText = termLink(branchText, url)
+		}
+		line2 += " " + green + "(" + branchText + dirtyStr + green + statsStr + green + ")" + reset
 	}
 
 	// Short commit SHA — green if pushed, red if not
